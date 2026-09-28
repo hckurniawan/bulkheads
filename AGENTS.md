@@ -77,13 +77,15 @@ Preserve this structure when adding or editing a wrapper:
 
 ## Choosing an image
 
-- **Prefer an official Docker Hub image** when the tool publishes one. Run it directly, with no Dockerfile, no `image_needs_build` and no `build`, since `container run` pulls it on first use.
-- **Pin a `major.minor` tag**, never `:latest`. Moving to a new major means bumping the tag by hand.
-- **Resolve the tag at runtime.** Call `registry_resolve_image "${IMAGE}"` after `container_require`, and run `"${RESOLVED_IMAGE}"` instead of `"${IMAGE}"`.
-  - It checks Docker Hub at most once per `STALENESS_PERIOD`.
-  - It adopts newer minors within the pinned major and never a newer major.
-  - It is silent and reports only through `RESOLVED_IMAGE` and `IMAGE_MAJOR_AVAILABLE`. The wrapper uses `log_info` when the resolved tag differs from the pin, and `log_warn` when a newer major exists.
-  - Network errors and non-numeric tags leave the pin unchanged.
+- **Prefer an official Docker Hub image** when the tool publishes one. Run it directly, with no Dockerfile, since `container run` pulls it when it's missing.
+- **Pin a `major.minor` tag**, never `:latest`. Docker Hub moves that tag to each new patch release, so the pin tracks patches. A new minor or major is a hand edit; nothing adopts one automatically.
+- **Track the tag with the `base` policy**, using the image as its own base:
+  ```sh
+  image_needs_build "${IMAGE}" base "${IMAGE}" && pull
+  ```
+  - `container run` never re-pulls a tag it already has, so a moved tag is detected by its Docker Hub digest. When it changed, `image_needs_build` removes the stale local copy and `container run` pulls the current one.
+  - The wrapper's `pull` only calls `image_record_base "${IMAGE}" "${IMAGE}"`. There is nothing to build.
+  - The wrapper's `update` is the usual `image_update "${IMAGE}" "…"`, which removes the image so the next run pulls it.
 - **Use the build pattern only when necessary**: when there's no official image, when the tool installs through npm, pip, gem or an install script, or when significant post-install setup is needed.
   - Name the image `docklet/<script-name>` so `IMAGE` matches the wrapper's filename.
   - Pick the base by what drifts: a moving base tag gets `base`; a pinned base that installs "latest" gets `age`; fully pinned gets `missing`.
@@ -98,7 +100,7 @@ Preserve this structure when adding or editing a wrapper:
 | `core.sh` | `PERSISTENT_DATA_DIR` (`~/docklet-data`), `DOCKLET_SYSTEM_DIR` (`…/.docklet`), `STALENESS_PERIOD` (1 day), `log_info`/`log_warn`/`log_error`, `data_dir` | nothing |
 | `args.sh` | `args_parse` | core |
 | `engine.sh` | `container_require`, `container_start_system`, `container_builder_reset`, `container_build_context` | core |
-| `registry.sh` | `registry_digest_changed`, `registry_resolve_image`, `registry_cache_path`, `registry_forget_resolved` | core |
+| `registry.sh` | `registry_digest_changed` | core |
 | `image.sh` | `image_exists`, `image_remove`, `image_build`, `image_update`, `image_needs_build`, `image_record_base`, `image_slug`, `image_stamp_path`, `image_stamp_stale` | core, engine, registry |
 
 **Keep the layering intact and greppable:**
@@ -146,9 +148,8 @@ The repository and install directory are named `docklets`, while the project and
 ## Runtime state
 
 - **Stamps.** Build and base stamps are stored in `${DOCKLET_SYSTEM_DIR}` as `.<image_slug>.<kind>`. The slug replaces `/` and `:` with `_`, and the kind is `built`, `checked` or `base-digest`. Values are `date +%s` epochs or digests.
-  - Stamps are keyed on the *docklet* image, never on the base, so two wrappers sharing a base keep separate throttles.
+  - Stamps are keyed on the *docklet* image, never on the base, so two wrappers sharing a base keep separate throttles. An official-image wrapper has no docklet image, so its stamps are keyed on the official image (e.g. `.hashicorp_terraform_1.15.checked`).
   - Never read a timestamp back off the image. `container image inspect` has no `--format`, and its date encoding is unreliable ([apple/container#1533](https://github.com/apple/container/issues/1533)).
-- **Official-image cache.** `registry_resolve_image` writes `.<repo slug>-last-checked` and `.<repo slug>-resolved` directly in `${PERSISTENT_DATA_DIR}` (e.g. `.hashicorp_terraform-resolved`), not in `.docklet/`. `registry_cache_path` names them and `registry_forget_resolved` deletes them. Deleting them is safe and forces a fresh Hub check.
 - **Deleting state is safe.**
   - Deleting `checked` causes another Hub check.
   - Deleting `base-digest` makes the next check see a change and rebuild.

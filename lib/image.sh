@@ -18,7 +18,7 @@ _DOCKLET_IMAGE_SH=1
 . "${DOCKLET_LIB_DIR}/registry.sh"
 
 # Slugifies an image reference into a filename-safe token ("docklet/yt-dlp" becomes
-# "docklet_yt-dlp"), the same scheme registry_resolve_image uses for its cache files.
+# "docklet_yt-dlp").
 image_slug() {
 	printf '%s' "$1" | tr '/:' '__'
 }
@@ -140,11 +140,11 @@ image_update() {
 	tool="$(basename "$0")"
 
 	if ! image_exists "${image}"; then
-		log_info "No local image found; nothing to remove. A fresh image will be built on the next run."
+		log_info "No local image found; nothing to remove. A fresh image will be built or pulled on the next run."
 		return 0
 	fi
 
-	log_info "Removing the local image so the next run rebuilds it with ${what}..."
+	log_info "Removing the local image so the next run replaces it with ${what}..."
 	if ! image_remove "${image}"; then
 		log_warn "Could not remove the image — it may still be in use by a running container. Close all ${tool} sessions, then run '${tool} update' again."
 		return 1
@@ -152,7 +152,7 @@ image_update() {
 
 	# The build stamp describes an image that no longer exists.
 	rm -f "$(image_stamp_path "${image}" built)"
-	log_info "Image removed. The updated image will be built on the next run."
+	log_info "Image removed. The updated image will be built or pulled on the next run."
 	return 0
 }
 
@@ -166,7 +166,7 @@ image_update() {
 #   - BASE_CHECK:   base policy only — what the Docker Hub check did: "skipped" (still
 #                   within STALENESS_PERIOD), "unchanged", "changed" or "unreachable".
 #                   Empty under the other policies.
-# Unlike registry_resolve_image this one logs, because every caller wants the same
+# Unlike registry_digest_changed this one logs, because every caller wants the same
 # wording, and under the base policy it also drops the stale local base image when the
 # digest moved, so the rebuild pulls the new one. Misuse (no image, unknown policy, a
 # non-numeric period) exits rather than returning, so a caller bug can never be read as
@@ -244,9 +244,9 @@ image_needs_build() {
 
 			BASE_CHECK="changed"
 			BUILD_REASON="base"
-			log_info "A new ${policy_arg} was published, rebuilding..."
+			log_info "A new ${policy_arg} was published, refreshing the image..."
 			# Drop the stale local base so the build pulls the fresh one.
-			image_remove "${policy_arg}" || log_warn "Could not remove the local ${policy_arg}; the rebuild may reuse it."
+			image_remove "${policy_arg}" || log_warn "Could not remove the local ${policy_arg}; the refresh may reuse it."
 			return 0
 			;;
 

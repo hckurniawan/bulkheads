@@ -43,11 +43,11 @@ docklet update                            # pull the latest wrapper scripts
 
 After adding a wrapper, run it by name from any directory, e.g. `claude-code-cli [args...]`.
 
-Some wrappers accept `update`, which rebuilds their image with the tool's latest release on the next run. To pass the word `update` to the tool itself instead, put it after `--`:
+Some wrappers accept `update`, which replaces their image with the tool's latest release on the next run. To pass the word `update` to the tool itself instead, put it after `--`:
 
 ```bash
-claude-work update      # rebuild the image
-claude-work -- update   # run yt-dlp's own update
+claude-work update      # replace the image
+claude-work -- update   # run claude's own update
 ```
 
 ## Data and isolation

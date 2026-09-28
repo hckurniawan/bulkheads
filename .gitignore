@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code: keep shared config (settings.json, agents/, commands/, skills/),
+# ignore per-user and generated files.
+.claude/settings.local.json
+.claude/worktrees/

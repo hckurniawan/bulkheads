@@ -1,0 +1,77 @@
+#!/bin/bash
+# Wrapper that runs the Claude Code CLI inside a throwaway container,
+# building the image on first use and rebuilding when a new Alpine base is detected.
+set -e
+
+# Locate the docklet clone via the installed `docklet` manager (must be on PATH)
+# so the shared lib can be sourced. Hard requirement — no local fallback.
+DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
+. "${DOCKLET_HOME}/lib/common.sh"
+
+# Base image. Being an unpinned :latest tag it moves, so the wrapper rebuilds whenever
+# its Docker Hub digest changes — see the image_needs_build call in main.
+ALPINE_IMAGE="alpine:latest"
+
+# This will print the latest version of Claude
+CLAUDE_LATEST_VERSION="https://downloads.claude.ai/claude-code-releases/latest"
+
+# DATA_DIR is mounted into the container as /config and holds Claude's persistent
+# state (settings, history, etc.). data_dir derives it from the invoked name, so
+# symlinking this script under a different name produces a fully isolated config,
+# allowing multiple independent Claude identities from the same wrapper.
+DATA_DIR="$(data_dir)"
+
+# Name of the image to build and run.
+IMAGE="docklet/claude-code-cli"
+
+# Builds the image from the inline Dockerfile, then records the Alpine digest it was
+# built against so the next base check has a baseline. The Dockerfile is piped to
+# image_build, which spools it to a file, builds it against an empty context and
+# stamps the build time. Whether a build is needed at all is image_needs_build's call.
+build() {
+	log_info "Building image..."
+	container_builder_reset
+	image_build "${IMAGE}" --no-cache <<-EOF
+		FROM  	${ALPINE_IMAGE}
+		RUN   	wget -O /etc/apk/keys/claude-code.rsa.pub \\
+					https://downloads.claude.ai/keys/claude-code.rsa.pub \\
+				&& echo "https://downloads.claude.ai/claude-code/apk/latest" >> /etc/apk/repositories \\
+				&& apk add tzdata claude-code jq bash git python3 imagemagick curl \\
+				&& rm -rf /var/cache/apk/*
+		ENTRYPOINT ["claude"]
+	EOF
+	image_record_base "${IMAGE}" "${ALPINE_IMAGE}"
+}
+
+# Ensures the image is current, then runs the Claude Code CLI in a throwaway container.
+main() {
+	# `update` before the first `--` is ours; everything else goes to the tool.
+	args_parse update "$@"
+
+	container_require
+
+	if [ "${ARGS_COMMAND}" = "update" ]; then
+		image_update "${IMAGE}" "the latest Claude Code" || exit 1
+		exit 0
+	fi
+
+	mkdir -p "${DATA_DIR}"
+
+	# Rebuild when the image is missing, or when a new alpine:latest has been published
+	# (checked at most once per STALENESS_PERIOD).
+	image_needs_build "${IMAGE}" base "${ALPINE_IMAGE}" && build
+
+	# No --user: `container` bind mounts show up as root-owned inside the guest and it
+	# has no uid mapping yet (apple/container#165), so a non-root process couldn't write
+	# to them. Files written by in-container root land on the host owned by the invoking
+	# macOS user, which is what the old --user flag was for.
+	container run --rm -it \
+		-e TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||') \
+		-v "${DATA_DIR}:/config" \
+		-v "$( pwd ):/work" \
+		-w /work \
+		-e CLAUDE_CONFIG_DIR=/config \
+		"${IMAGE}" "${FORWARD_ARGS[@]}"
+}
+
+main "$@"

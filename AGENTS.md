@@ -15,14 +15,6 @@ Guidance for AI coding agents working in this repository. README.md is the user-
 
 ## Wrappers
 
-| Wrapper | Image | Rebuild policy | `DATA_DIR` mount | Own `update` |
-|---|---|---|---|---|
-| `claude-code-cli` | built on `alpine:latest` | `base` | `/config` | yes |
-| `kiro-cli` | built on `debian:stable` | `base` | `/opt/kiro/.kiro`, `/opt/kiro/.local/share/kiro-cli` | no |
-| `terraform` | official `hashicorp/terraform:1.15` | none; tag resolved at runtime | none (`HOME=/tmp`) | no |
-| `unrar` | built on `alpine:3.17.2` from a pinned source tarball | `missing` | none | no |
-| `yt-dlp` | built on `debian:13.4-slim`, installing the latest release | `age`, weekly | none | yes |
-
 Every wrapper also mounts the working directory: at `/work` for `claude-code-cli` and `kiro-cli`, and at `/data` for the others. Wrappers without a `DATA_DIR` keep nothing between runs.
 
 `bin/claude-code-cli` is the reference for the build pattern and `bin/terraform` for the official-image pattern.
@@ -86,7 +78,7 @@ Preserve this structure when adding or editing a wrapper:
 ## Choosing an image
 
 - **Prefer an official Docker Hub image** when the tool publishes one. Run it directly, with no Dockerfile, no `image_needs_build` and no `build`, since `container run` pulls it on first use.
-- **Pin a `major.minor` tag** (e.g. `hashicorp/terraform:1.15`), never `:latest`. Moving to a new major means bumping the tag by hand.
+- **Pin a `major.minor` tag**, never `:latest`. Moving to a new major means bumping the tag by hand.
 - **Resolve the tag at runtime.** Call `registry_resolve_image "${IMAGE}"` after `container_require`, and run `"${RESOLVED_IMAGE}"` instead of `"${IMAGE}"`.
   - It checks Docker Hub at most once per `STALENESS_PERIOD`.
   - It adopts newer minors within the pinned major and never a newer major.
@@ -106,7 +98,7 @@ Preserve this structure when adding or editing a wrapper:
 | `core.sh` | `PERSISTENT_DATA_DIR` (`~/docklet-data`), `DOCKLET_SYSTEM_DIR` (`…/.docklet`), `STALENESS_PERIOD` (1 day), `log_info`/`log_warn`/`log_error`, `data_dir` | nothing |
 | `args.sh` | `args_parse` | core |
 | `engine.sh` | `container_require`, `container_start_system`, `container_builder_reset`, `container_build_context` | core |
-| `registry.sh` | `registry_digest_changed`, `registry_resolve_image` | core |
+| `registry.sh` | `registry_digest_changed`, `registry_resolve_image`, `registry_cache_path`, `registry_forget_resolved` | core |
 | `image.sh` | `image_exists`, `image_remove`, `image_build`, `image_update`, `image_needs_build`, `image_record_base`, `image_slug`, `image_stamp_path`, `image_stamp_stale` | core, engine, registry |
 
 **Keep the layering intact and greppable:**
@@ -156,7 +148,7 @@ The repository and install directory are named `docklets`, while the project and
 - **Stamps.** Build and base stamps are stored in `${DOCKLET_SYSTEM_DIR}` as `.<image_slug>.<kind>`. The slug replaces `/` and `:` with `_`, and the kind is `built`, `checked` or `base-digest`. Values are `date +%s` epochs or digests.
   - Stamps are keyed on the *docklet* image, never on the base, so two wrappers sharing a base keep separate throttles.
   - Never read a timestamp back off the image. `container image inspect` has no `--format`, and its date encoding is unreliable ([apple/container#1533](https://github.com/apple/container/issues/1533)).
-- **Official-image cache.** `registry_resolve_image` writes `.<repo slug>-last-checked` and `.<repo slug>-resolved` directly in `${PERSISTENT_DATA_DIR}` (e.g. `.hashicorp_terraform-resolved`), not in `.docklet/`.
+- **Official-image cache.** `registry_resolve_image` writes `.<repo slug>-last-checked` and `.<repo slug>-resolved` directly in `${PERSISTENT_DATA_DIR}` (e.g. `.hashicorp_terraform-resolved`), not in `.docklet/`. `registry_cache_path` names them and `registry_forget_resolved` deletes them. Deleting them is safe and forces a fresh Hub check.
 - **Deleting state is safe.**
   - Deleting `checked` causes another Hub check.
   - Deleting `base-digest` makes the next check see a change and rebuild.
@@ -174,4 +166,4 @@ The repository and install directory are named `docklets`, while the project and
 After any structural change (a new or renamed wrapper, a changed lifecycle step, a new convention), update both files:
 
 - **README.md** first. It's the user-facing source of truth and stays short: requirements, install, usage, the wrapper table and one-line troubleshooting. Explanations of general behaviour, such as how images stay fresh, don't name specific tools.
-- **AGENTS.md** next. Rules, rationale, per-wrapper facts, upstream issue references and implementation details go here, including the [Wrappers](#wrappers) table.
+- **AGENTS.md** next. Rules, rationale, per-wrapper facts, upstream issue references and implementation details go here.

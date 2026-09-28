@@ -1,6 +1,7 @@
 #!/bin/bash
 # Wrapper that runs the Claude Code CLI inside a throwaway container,
-# building the image on first use and rebuilding when a new Alpine base is detected.
+# building the image on first use from a pinned Alpine base and rebuilding weekly
+# to pick up the latest Claude Code.
 set -e
 
 # Locate the docklet clone via the installed `docklet` manager (must be on PATH)
@@ -8,9 +9,9 @@ set -e
 DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
 . "${DOCKLET_HOME}/lib/common.sh"
 
-# Base image. Being an unpinned :latest tag it moves, so the wrapper rebuilds whenever
-# its Docker Hub digest changes — see the image_needs_build call in main.
-ALPINE_IMAGE="alpine:latest"
+# Base image, pinned to a fixed tag rather than :latest. Moving to a newer Alpine
+# means bumping this tag by hand.
+ALPINE_IMAGE="alpine:3.24.2"
 
 # This will print the latest version of Claude
 CLAUDE_LATEST_VERSION="https://downloads.claude.ai/claude-code-releases/latest"
@@ -24,8 +25,11 @@ DATA_DIR="$(data_dir)"
 # Name of the image to build and run.
 IMAGE="docklet/claude-code-cli"
 
-# Builds the image from the inline Dockerfile, then records the Alpine digest it was
-# built against so the next base check has a baseline. The Dockerfile is piped to
+# How old the image may get before it is rebuilt. The base is pinned but the
+# Dockerfile installs the latest Claude Code, so age is the only drift to track.
+REBUILD_PERIOD="$(( 7 * 24 * 60 * 60 ))"
+
+# Builds the image from the inline Dockerfile. The Dockerfile is piped to
 # image_build, which spools it to a file, builds it against an empty context and
 # stamps the build time. Whether a build is needed at all is image_needs_build's call.
 build() {
@@ -40,7 +44,6 @@ build() {
 				&& rm -rf /var/cache/apk/*
 		ENTRYPOINT ["claude"]
 	EOF
-	image_record_base "${IMAGE}" "${ALPINE_IMAGE}"
 }
 
 # Ensures the image is current, then runs the Claude Code CLI in a throwaway container.
@@ -57,9 +60,9 @@ main() {
 
 	mkdir -p "${DATA_DIR}"
 
-	# Rebuild when the image is missing, or when a new alpine:latest has been published
-	# (checked at most once per STALENESS_PERIOD).
-	image_needs_build "${IMAGE}" base "${ALPINE_IMAGE}" && build
+	# Rebuild when the image is missing or over REBUILD_PERIOD old. The base is pinned,
+	# so there's no digest to track. `claude-code-cli update` forces a rebuild.
+	image_needs_build "${IMAGE}" age "${REBUILD_PERIOD}" && build
 
 	# No --user: `container` bind mounts show up as root-owned inside the guest and it
 	# has no uid mapping yet (apple/container#165), so a non-root process couldn't write

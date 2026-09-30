@@ -1,4 +1,4 @@
-# docklet — Docker Hub, the OCI registry `container` pulls images from.
+# bulkhead — Docker Hub, the OCI registry `container` pulls images from.
 #
 # Registry layer. Everything here is plain HTTPS against hub.docker.com: **no function
 # in this file may call `container`.** That separation is what let these helpers survive
@@ -6,16 +6,16 @@
 # engine. Keep it greppable: `grep -n "container " lib/registry.sh` should only ever
 # match comments.
 
-# Part of docklet's shared library; loaded by lib/common.sh. Source-only — this file
+# Part of bulkhead's shared library; loaded by lib/common.sh. Source-only — this file
 # defines functions and variables and executes nothing.
-if [ -n "${_DOCKLET_REGISTRY_SH:-}" ]; then return 0; fi
-_DOCKLET_REGISTRY_SH=1
+if [ -n "${_BULKHEAD_REGISTRY_SH:-}" ]; then return 0; fi
+_BULKHEAD_REGISTRY_SH=1
 
 # Resolve this part's own directory so it can pull in what it depends on, making it
 # sourceable on its own (handy for testing a layer in isolation). $0 is the wrapper,
 # not this file, so BASH_SOURCE is the only reliable handle.
-: "${DOCKLET_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-. "${DOCKLET_LIB_DIR}/core.sh"
+: "${BULKHEAD_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+. "${BULKHEAD_LIB_DIR}/core.sh"
 
 # Checks whether the Docker Hub digest for an image differs from a known hash. Docker Hub
 # here is the registry `container` pulls from; the Docker engine is not involved.
@@ -29,8 +29,9 @@ _DOCKLET_REGISTRY_SH=1
 # Returns 0 when the digest changed, non-zero otherwise — so callers can branch on either
 # the return code or the globals. Network errors and missing digests return non-zero with
 # DIGEST_CHANGED=false. Usage:
-#   if registry_digest_changed "alpine:latest" "${stored_digest}"; then ... fi
-registry_digest_changed() {
+#   if _registry_digest_changed "alpine:latest" "${stored_digest}"; then ... fi
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_registry_digest_changed() {
 	local image current_hash repo tag hub_repo
 	image="$1"
 	current_hash="$2"

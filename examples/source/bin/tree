@@ -1,0 +1,64 @@
+#!/bin/bash
+# Wrapper that runs tree inside a throwaway container, building the image on first use
+# from a pinned Alpine base and supporting `tree update` to force a rebuild.
+set -e
+
+# Locate the bulkhead clone via the installed `bulkhead` manager (must be on PATH)
+# so the shared lib can be sourced. Hard requirement — no local fallback. The lib
+# checks this source's bulkhead-source before anything below runs.
+BULKHEAD_HOME="$(bulkhead home)" || { echo "bulkhead not found on PATH; install bulkhead first" >&2; exit 1; }
+. "${BULKHEAD_HOME}/lib/common.sh"
+
+# Base image, pinned to a fixed tag rather than :latest. Moving to a newer Alpine
+# means bumping this tag by hand.
+ALPINE_IMAGE="alpine:3.24.2"
+
+# Name of the image to build and run.
+IMAGE="bulkhead/tree"
+
+# Builds the image from the inline Dockerfile. The Dockerfile is piped to
+# image_build, which spools it to a file, builds it against an empty context and
+# stamps the build time. Whether a build is needed at all is image_needs_build's call.
+build() {
+	log_info "Building image..."
+	image_build "${IMAGE}" <<-EOD
+		FROM ${ALPINE_IMAGE}
+
+		RUN apk add --no-cache tree \\
+		    && rm -rf /var/cache/apk/*
+
+		ENTRYPOINT [ "/usr/bin/tree" ]
+	EOD
+}
+
+# Ensures the image exists, then runs tree against the current directory.
+main() {
+	# `update` before the first `--` is ours; everything else goes to the tool.
+	args_parse update "$@"
+
+	container_require
+
+	if [ "${ARGS_COMMAND}" = "update" ]; then
+		image_update "${IMAGE}" "the latest tree in Alpine ${ALPINE_IMAGE##*:}" || exit 1
+		exit 0
+	fi
+
+	# The base is pinned and tree comes from that release's repository, so the image
+	# only needs building when it is missing. `tree update` rebuilds to pick up patched
+	# packages.
+	image_needs_build "${IMAGE}" missing && build
+
+	# Allocate a TTY only when both stdin and stdout are one, so redirected output
+	# doesn't get CRLF newlines.
+	tty_flag="-i"
+	[ -t 0 ] && [ -t 1 ] && tty_flag="-it"
+
+	# No --user: every bulkhead wrapper runs as the image's default user (see the core
+	# AGENTS.md).
+	container run ${tty_flag} --init --rm \
+		-v "$( pwd ):/data" \
+		-w /data \
+		"${IMAGE}" "${FORWARD_ARGS[@]}"
+}
+
+main "$@"

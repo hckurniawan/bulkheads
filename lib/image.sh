@@ -1,46 +1,49 @@
-# docklet — the image lifecycle: does an image exist, is it stale, build it, stamp it.
+# bulkhead — the image lifecycle: does an image exist, is it stale, build it, stamp it.
 #
 # Top layer, built on all three below it. `container image inspect` and `container image
 # rm` are spelled here and nowhere else in the repo, so a wrapper never talks to the
 # engine about images directly.
 
-# Part of docklet's shared library; loaded by lib/common.sh. Source-only — this file
+# Part of bulkhead's shared library; loaded by lib/common.sh. Source-only — this file
 # defines functions and variables and executes nothing.
-if [ -n "${_DOCKLET_IMAGE_SH:-}" ]; then return 0; fi
-_DOCKLET_IMAGE_SH=1
+if [ -n "${_BULKHEAD_IMAGE_SH:-}" ]; then return 0; fi
+_BULKHEAD_IMAGE_SH=1
 
 # Resolve this part's own directory so it can pull in what it depends on, making it
 # sourceable on its own (handy for testing a layer in isolation). $0 is the wrapper,
 # not this file, so BASH_SOURCE is the only reliable handle.
-: "${DOCKLET_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-. "${DOCKLET_LIB_DIR}/core.sh"
-. "${DOCKLET_LIB_DIR}/engine.sh"
-. "${DOCKLET_LIB_DIR}/registry.sh"
+: "${BULKHEAD_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+. "${BULKHEAD_LIB_DIR}/core.sh"
+. "${BULKHEAD_LIB_DIR}/engine.sh"
+. "${BULKHEAD_LIB_DIR}/registry.sh"
 
-# Slugifies an image reference into a filename-safe token ("docklet/yt-dlp" becomes
-# "docklet_yt-dlp").
-image_slug() {
+# Slugifies an image reference into a filename-safe token ("bulkhead/yt-dlp" becomes
+# "bulkhead_yt-dlp").
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_image_slug() {
 	printf '%s' "$1" | tr '/:' '__'
 }
 
-# Prints the path of one of an image's state files under DOCKLET_SYSTEM_DIR. Kinds:
+# Prints the path of one of an image's state files under BULKHEAD_SYSTEM_DIR. Kinds:
 #   built        epoch of the last successful image_build of this tag
 #   checked      epoch of the last Docker Hub check for this image's base
 #   base-digest  the base digest this image was last built against
-# Always keyed on the docklet image, never on the base — so two wrappers sharing a
+# Always keyed on the bulkhead image, never on the base — so two wrappers sharing a
 # base each keep their own throttle and their own digest, and one wrapper rebuilding
 # can't suppress the other's rebuild.
-image_stamp_path() {
-	mkdir -p "${DOCKLET_SYSTEM_DIR}"
-	printf '%s/.%s.%s' "${DOCKLET_SYSTEM_DIR}" "$(image_slug "$1")" "$2"
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_image_stamp_path() {
+	mkdir -p "${BULKHEAD_SYSTEM_DIR}"
+	printf '%s/.%s.%s' "${BULKHEAD_SYSTEM_DIR}" "$(_image_slug "$1")" "$2"
 }
 
 # Returns 0 if an image's stamp is missing, unreadable, or older than <seconds>.
 # A missing or corrupt stamp counts as stale, so the first run after this helper was
 # introduced always acts rather than silently skipping.
-image_stamp_stale() {
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_image_stamp_stale() {
 	local stamp recorded
-	stamp="$(image_stamp_path "$1" "$2")"
+	stamp="$(_image_stamp_path "$1" "$2")"
 	[ -f "${stamp}" ] || return 0
 
 	recorded="$(cat "${stamp}" 2>/dev/null)"
@@ -52,15 +55,16 @@ image_stamp_stale() {
 }
 
 # Returns 0 if the running wrapper script ($0) was modified after the image's last
-# successful image_build, e.g. a `docklet update` changed its Dockerfile. `stat -L`
+# successful image_build, e.g. a `bulkhead update` changed its Dockerfile. `stat -L`
 # follows the ~/.local/bin symlink to the file in the clone; the link's own mtime is
-# just when `docklet add` ran. `-f %m` is BSD stat, which is all docklet targets.
+# just when `bulkhead add` ran. `-f %m` is BSD stat, which is all bulkhead targets.
 # Without a built stamp there is nothing to compare against (official images are
 # pulled, never built), and an unreadable script or stamp is no evidence of a change,
 # so all of those return 1 rather than forcing a rebuild.
-image_script_newer() {
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_image_script_newer() {
 	local stamp built modified
-	stamp="$(image_stamp_path "$1" built)"
+	stamp="$(_image_stamp_path "$1" built)"
 	[ -f "${stamp}" ] || return 1
 
 	built="$(cat "${stamp}" 2>/dev/null)"
@@ -78,9 +82,10 @@ image_script_newer() {
 
 # Returns 0 if the named image is present locally. This is the one place
 # `container image inspect` is spelled — every existence check goes through it.
-image_exists() {
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_image_exists() {
 	if [ -z "$1" ]; then
-		log_error "image_exists: no image given."
+		log_error "_image_exists: no image given."
 		exit 1
 	fi
 	container image inspect "$1" >/dev/null 2>&1
@@ -89,12 +94,13 @@ image_exists() {
 # Removes a local image. A missing image is success — that is the state we wanted.
 # Returns non-zero only when the image exists and could not be removed, e.g. a running
 # container still references it.
-image_remove() {
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_image_remove() {
 	if [ -z "$1" ]; then
-		log_error "image_remove: no image given."
+		log_error "_image_remove: no image given."
 		exit 1
 	fi
-	image_exists "$1" || return 0
+	_image_exists "$1" || return 0
 	container image rm "$1" >/dev/null 2>&1
 }
 
@@ -118,9 +124,9 @@ image_build() {
 	tag="$1"
 	shift
 
-	mkdir -p "${DOCKLET_SYSTEM_DIR}"
-	dockerfile="$(mktemp "${DOCKLET_SYSTEM_DIR}/Dockerfile.XXXXXX")" || {
-		log_error "Could not create a temporary Dockerfile in ${DOCKLET_SYSTEM_DIR}."
+	mkdir -p "${BULKHEAD_SYSTEM_DIR}"
+	dockerfile="$(mktemp "${BULKHEAD_SYSTEM_DIR}/Dockerfile.XXXXXX")" || {
+		log_error "Could not create a temporary Dockerfile in ${BULKHEAD_SYSTEM_DIR}."
 		return 1
 	}
 	cat > "${dockerfile}"
@@ -134,21 +140,21 @@ image_build() {
 	fi
 
 	build_status=0
-	container build -t "${tag}" "$@" -f "${dockerfile}" "$(container_build_context)" || build_status=$?
+	container build -t "${tag}" "$@" -f "${dockerfile}" "$(_container_build_context)" || build_status=$?
 	rm -f "${dockerfile}"
 	[ "${build_status}" -eq 0 ] || return "${build_status}"
 
 	# A zero exit should mean the tag now resolves; if it doesn't, something is wrong
 	# that a later "image not found" would only obscure.
-	if ! image_exists "${tag}"; then
+	if ! _image_exists "${tag}"; then
 		log_error "container build reported success but ${tag} is not present locally."
 		return 1
 	fi
 
-	date +%s > "$(image_stamp_path "${tag}" built)"
+	date +%s > "$(_image_stamp_path "${tag}" built)"
 }
 
-# Removes a docklet-built image so the next run rebuilds it from scratch — the shared
+# Removes a bulkhead-built image so the next run rebuilds it from scratch — the shared
 # implementation of the wrappers' `update` command. The optional second argument names
 # what the rebuild will pick up (e.g. "the latest yt-dlp") and only shapes the message.
 # Returns 0 when the image is gone, including when it was never there, and 1 when it
@@ -164,19 +170,19 @@ image_update() {
 	what="${2:-a fresh build}"
 	tool="$(basename "$0")"
 
-	if ! image_exists "${image}"; then
+	if ! _image_exists "${image}"; then
 		log_info "No local image found; nothing to remove. A fresh image will be built or pulled on the next run."
 		return 0
 	fi
 
 	log_info "Removing the local image so the next run replaces it with ${what}..."
-	if ! image_remove "${image}"; then
+	if ! _image_remove "${image}"; then
 		log_warn "Could not remove the image — it may still be in use by a running container. Close all ${tool} sessions, then run '${tool} update' again."
 		return 1
 	fi
 
 	# The build stamp describes an image that no longer exists.
-	rm -f "$(image_stamp_path "${image}" built)"
+	rm -f "$(_image_stamp_path "${image}" built)"
 	log_info "Image removed. The updated image will be built or pulled on the next run."
 	return 0
 }
@@ -187,14 +193,14 @@ image_update() {
 #   image_needs_build <image> base <base-image>    ...or when the base digest moved
 # Every policy implies "missing" — an absent image always needs building — and every
 # policy also rebuilds a built image whose wrapper script changed since the build (see
-# image_script_newer). The policy's own check runs first, so a moved base is still
+# _image_script_newer). The policy's own check runs first, so a moved base is still
 # reported and its stale local copy still dropped when the script changed too.
 # Returns 0 when a build is needed, non-zero otherwise, and reports through globals:
 #   - BUILD_REASON: "missing", "age", "base", "script", or "none".
 #   - BASE_CHECK:   base policy only — what the Docker Hub check did: "skipped" (still
 #                   within STALENESS_PERIOD), "unchanged", "changed" or "unreachable".
 #                   Empty under the other policies.
-# Unlike registry_digest_changed this one logs, because every caller wants the same
+# Unlike _registry_digest_changed this one logs, because every caller wants the same
 # wording, and under the base policy it also drops the stale local base image when the
 # digest moved, so the rebuild pulls the new one. Misuse (no image, unknown policy, a
 # non-numeric period) exits rather than returning, so a caller bug can never be read as
@@ -213,7 +219,7 @@ image_needs_build() {
 		exit 1
 	fi
 
-	if ! image_exists "${image}"; then
+	if ! _image_exists "${image}"; then
 		BUILD_REASON="missing"
 		return 0
 	fi
@@ -231,7 +237,7 @@ image_needs_build() {
 					exit 1
 					;;
 			esac
-			if image_stamp_stale "${image}" built "${policy_arg}"; then
+			if _image_stamp_stale "${image}" built "${policy_arg}"; then
 				BUILD_REASON="age"
 				return 0
 			fi
@@ -244,16 +250,16 @@ image_needs_build() {
 			fi
 
 			# Ask Docker Hub at most once per STALENESS_PERIOD.
-			if ! image_stamp_stale "${image}" checked "${STALENESS_PERIOD}"; then
+			if ! _image_stamp_stale "${image}" checked "${STALENESS_PERIOD}"; then
 				BASE_CHECK="skipped"
 			else
 				stored_digest=""
-				digest_file="$(image_stamp_path "${image}" base-digest)"
+				digest_file="$(_image_stamp_path "${image}" base-digest)"
 				[ -f "${digest_file}" ] && stored_digest="$(cat "${digest_file}")"
 
 				log_info "Checking Docker Hub for ${policy_arg} updates..."
-				registry_digest_changed "${policy_arg}" "${stored_digest}" || true
-				date +%s > "$(image_stamp_path "${image}" checked)"
+				_registry_digest_changed "${policy_arg}" "${stored_digest}" || true
+				date +%s > "$(_image_stamp_path "${image}" checked)"
 
 				# A failed fetch is not a change — leave the image alone and try again next
 				# time. The check timestamp is still written, so an outage can't turn every
@@ -269,7 +275,7 @@ image_needs_build() {
 					BUILD_REASON="base"
 					log_info "A new ${policy_arg} was published, refreshing the image..."
 					# Drop the stale local base so the build pulls the fresh one.
-					image_remove "${policy_arg}" || log_warn "Could not remove the local ${policy_arg}; the refresh may reuse it."
+					_image_remove "${policy_arg}" || log_warn "Could not remove the local ${policy_arg}; the refresh may reuse it."
 					return 0
 				fi
 			fi
@@ -281,7 +287,7 @@ image_needs_build() {
 			;;
 	esac
 
-	image_script_newer "${image}" || return 1
+	_image_script_newer "${image}" || return 1
 	BUILD_REASON="script"
 	log_info "$(basename "$0") changed since its image was built, rebuilding..."
 	return 0
@@ -299,10 +305,10 @@ image_record_base() {
 	fi
 
 	if [ -z "${FETCHED_DIGEST}" ]; then
-		registry_digest_changed "$2" "" || true
+		_registry_digest_changed "$2" "" || true
 	fi
 	[ -n "${FETCHED_DIGEST}" ] || return 0
 
-	printf '%s' "${FETCHED_DIGEST}" > "$(image_stamp_path "$1" base-digest)"
-	date +%s > "$(image_stamp_path "$1" checked)"
+	printf '%s' "${FETCHED_DIGEST}" > "$(_image_stamp_path "$1" base-digest)"
+	date +%s > "$(_image_stamp_path "$1" checked)"
 }

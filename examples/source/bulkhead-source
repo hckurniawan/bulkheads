@@ -1,0 +1,12 @@
+# bulkhead-source: the manifest a bulkhead source keeps at its repository root, next to
+# its bin/ folder. `bulkhead source add` refuses a repository without it.
+#
+# Lines are key=value, with no spaces around the "=". Blank lines, comments and
+# unknown keys are ignored. The file is parsed, never run.
+
+# The bulkhead version this source's wrappers rely on (see `bulkhead version`), as
+# major, major.minor or major.minor.patch; missing parts count as 0. A wrapper runs
+# only when the installed bulkhead has the same major and is at least this version, so
+# requires=2 accepts any 2.x, and requires=2.0.3 needs 2.0.3 or later. Pre-releases,
+# build metadata and ranges such as >=2 aren't accepted.
+requires=2

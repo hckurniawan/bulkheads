@@ -19,6 +19,11 @@ Every wrapper also mounts the working directory: at `/work` for `claude-code-cli
 
 `bin/claude-code-cli` is the reference for the build pattern and `bin/terraform` for the official-image pattern.
 
+**`yq`** runs the official `mikefarah/yq` image, with two exceptions to the rules below:
+- **Tag `4`, not `major.minor`.** The image publishes only `4` and full `4.x.y` tags, so the pin is the major version. The `base` check therefore adopts new minor releases as well as patches. A new major is still a hand edit.
+- **It runs as the image's non-root `USER yq`.** It passes no `--user`, as the rule requires, but the image doesn't run as root the way the rule assumes. Because mounts are root-owned inside the guest, yq can likely read files but not write them, so `yq -i` is expected to fail. This was chosen deliberately to leave the image's user alone. Switching to `--user root` would allow writes, and would be a documented exception to the no-`--user` rule.
+- `-w /data` overrides the image's `/workdir`.
+
 **`gpg` and `git-secret` share one image**, `docklet/gpg`, so git-secret always runs the exact gpg the `gpg` wrapper runs, against a `gpg` keyring.
 - `bin/gpg` owns everything: the Dockerfile, `update`, the mounts and the run. Its image installs Alpine's `gnupg` plus git-secret and git-secret's dependencies.
 - `bin/git-secret` only resolves the keyring and runs `DOCKLET_GPG_TOOL=git-secret DOCKLET_GPG_KEYRING="${KEYRING}" exec "${DOCKLET_HOME}/bin/gpg" "$@"`. It doesn't source the lib or define a Dockerfile, and it never builds an image of its own.

@@ -1,0 +1,54 @@
+#!/bin/bash
+# Wrapper that runs yq inside a throwaway container using the official image.
+set -e
+
+# Locate the docklet clone via the installed `docklet` manager (must be on PATH)
+# so the shared lib can be sourced. Hard requirement — no local fallback.
+DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
+. "${DOCKLET_HOME}/lib/common.sh"
+
+# Official image the wrapper runs yq in. mikefarah/yq publishes no major.minor tags,
+# only `4` and full versions, so this pins the major: Docker Hub moves `4` to every 4.x
+# release, minors included. A new major is a hand edit.
+IMAGE="mikefarah/yq:4"
+
+# The official image is pulled, not built. image_needs_build has already removed a stale
+# local copy, so `container run` pulls the current tag; all that's left is recording
+# the digest it adopted, so the next check compares against it.
+pull() {
+	image_record_base "${IMAGE}" "${IMAGE}"
+}
+
+# Runs yq in the official container, mounting the current directory.
+main() {
+	# `update` before the first `--` is ours; everything else goes to the tool.
+	args_parse update "$@"
+
+	container_require
+
+	if [ "${ARGS_COMMAND}" = "update" ]; then
+		image_update "${IMAGE}" "the latest yq ${IMAGE##*:}.x release" || exit 1
+		exit 0
+	fi
+
+	# Pull again when the image is missing or Docker Hub has moved the tag (checked at
+	# most once per STALENESS_PERIOD). `yq update` forces a fresh pull.
+	image_needs_build "${IMAGE}" base "${IMAGE}" && pull
+
+	# Allocate a TTY only when both stdin and stdout are one, so redirected output
+	# doesn't get CRLF newlines.
+	tty_flag="-i"
+	[ -t 0 ] && [ -t 1 ] && tty_flag="-it"
+
+	# No --user, but unlike other wrappers this does NOT mean root: the image bakes in
+	# USER yq. `container` bind mounts are root-owned inside the guest (no uid mapping yet
+	# — apple/container#165), so yq can read files in the current directory but likely
+	# can't write there; `yq -i` (in-place edit) is expected to fail. Kept deliberately:
+	# the image's own user is left alone. -w /data overrides the image's /workdir.
+	container run ${tty_flag} --init --rm \
+		-v "$( pwd ):/data" \
+		-w /data \
+		"${IMAGE}" "${FORWARD_ARGS[@]}"
+}
+
+main "$@"

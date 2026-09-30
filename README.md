@@ -71,6 +71,7 @@ Nothing else triggers a rebuild. `docklet update` only updates the scripts, and 
 | `gpg` | [GnuPG](https://gnupg.org/): encrypts, decrypts and signs files, and manages keys. | Keyring |
 | `terraform` | HashiCorp Terraform, from the official image. | Nothing |
 | `unrar` | RARLAB's UnRAR: lists, tests and extracts RAR archives. | Nothing |
+| `yq` | [yq](https://mikefarah.gitbook.io/yq/): reads, queries and converts YAML, JSON and XML, from the official image. In-place edits (`yq -i`) aren't expected to work; redirect the output instead. | Nothing |
 
 ### git-secret and gpg keyrings
 

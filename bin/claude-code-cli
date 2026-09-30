@@ -64,11 +64,16 @@ main() {
 	# so there's no digest to track. `claude-code-cli update` forces a rebuild.
 	image_needs_build "${IMAGE}" age "${REBUILD_PERIOD}" && build
 
+	# Allocate a TTY only when both stdin and stdout are one, so redirected output
+	# doesn't get CRLF newlines.
+	tty_flag="-i"
+	[ -t 0 ] && [ -t 1 ] && tty_flag="-it"
+
 	# No --user: `container` bind mounts show up as root-owned inside the guest and it
 	# has no uid mapping yet (apple/container#165), so a non-root process couldn't write
 	# to them. Files written by in-container root land on the host owned by the invoking
 	# macOS user, which is what the old --user flag was for.
-	container run --rm -it \
+	container run ${tty_flag} --init --rm \
 		-e TZ=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||') \
 		-v "${DATA_DIR}:/config" \
 		-v "$( pwd ):/work" \

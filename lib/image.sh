@@ -51,6 +51,31 @@ image_stamp_stale() {
 	[ "$(( $(date +%s) - recorded ))" -gt "$3" ]
 }
 
+# Returns 0 if the running wrapper script ($0) was modified after the image's last
+# successful image_build, e.g. a `docklet update` changed its Dockerfile. `stat -L`
+# follows the ~/.local/bin symlink to the file in the clone; the link's own mtime is
+# just when `docklet add` ran. `-f %m` is BSD stat, which is all docklet targets.
+# Without a built stamp there is nothing to compare against (official images are
+# pulled, never built), and an unreadable script or stamp is no evidence of a change,
+# so all of those return 1 rather than forcing a rebuild.
+image_script_newer() {
+	local stamp built modified
+	stamp="$(image_stamp_path "$1" built)"
+	[ -f "${stamp}" ] || return 1
+
+	built="$(cat "${stamp}" 2>/dev/null)"
+	case "${built}" in
+		"" | *[!0-9]*) return 1 ;;
+	esac
+
+	modified="$(stat -L -f %m "$0" 2>/dev/null)" || return 1
+	case "${modified}" in
+		"" | *[!0-9]*) return 1 ;;
+	esac
+
+	[ "${modified}" -gt "${built}" ]
+}
+
 # Returns 0 if the named image is present locally. This is the one place
 # `container image inspect` is spelled — every existence check goes through it.
 image_exists() {
@@ -160,9 +185,12 @@ image_update() {
 #   image_needs_build <image> missing              build only when absent
 #   image_needs_build <image> age  <seconds>       ...or when older than <seconds>
 #   image_needs_build <image> base <base-image>    ...or when the base digest moved
-# Every policy implies "missing" — an absent image always needs building.
+# Every policy implies "missing" — an absent image always needs building — and every
+# policy also rebuilds a built image whose wrapper script changed since the build (see
+# image_script_newer). The policy's own check runs first, so a moved base is still
+# reported and its stale local copy still dropped when the script changed too.
 # Returns 0 when a build is needed, non-zero otherwise, and reports through globals:
-#   - BUILD_REASON: "missing", "age", "base", or "none".
+#   - BUILD_REASON: "missing", "age", "base", "script", or "none".
 #   - BASE_CHECK:   base policy only — what the Docker Hub check did: "skipped" (still
 #                   within STALENESS_PERIOD), "unchanged", "changed" or "unreachable".
 #                   Empty under the other policies.
@@ -190,9 +218,10 @@ image_needs_build() {
 		return 0
 	fi
 
+	# Each branch returns 0 when its policy needs a build and falls through to the
+	# script check below when it doesn't.
 	case "${policy}" in
 		missing)
-			return 1
 			;;
 
 		age)
@@ -202,9 +231,10 @@ image_needs_build() {
 					exit 1
 					;;
 			esac
-			image_stamp_stale "${image}" built "${policy_arg}" || return 1
-			BUILD_REASON="age"
-			return 0
+			if image_stamp_stale "${image}" built "${policy_arg}"; then
+				BUILD_REASON="age"
+				return 0
+			fi
 			;;
 
 		base)
@@ -214,40 +244,35 @@ image_needs_build() {
 			fi
 
 			# Ask Docker Hub at most once per STALENESS_PERIOD.
-			image_stamp_stale "${image}" checked "${STALENESS_PERIOD}" || {
+			if ! image_stamp_stale "${image}" checked "${STALENESS_PERIOD}"; then
 				BASE_CHECK="skipped"
-				return 1
-			}
+			else
+				stored_digest=""
+				digest_file="$(image_stamp_path "${image}" base-digest)"
+				[ -f "${digest_file}" ] && stored_digest="$(cat "${digest_file}")"
 
-			stored_digest=""
-			digest_file="$(image_stamp_path "${image}" base-digest)"
-			[ -f "${digest_file}" ] && stored_digest="$(cat "${digest_file}")"
+				log_info "Checking Docker Hub for ${policy_arg} updates..."
+				registry_digest_changed "${policy_arg}" "${stored_digest}" || true
+				date +%s > "$(image_stamp_path "${image}" checked)"
 
-			log_info "Checking Docker Hub for ${policy_arg} updates..."
-			registry_digest_changed "${policy_arg}" "${stored_digest}" || true
-			date +%s > "$(image_stamp_path "${image}" checked)"
-
-			# A failed fetch is not a change — leave the image alone and try again next
-			# time. The check timestamp is still written, so an outage can't turn every
-			# run into a Docker Hub call.
-			if [ -z "${FETCHED_DIGEST}" ]; then
-				BASE_CHECK="unreachable"
-				log_warn "Could not reach Docker Hub — skipping the ${policy_arg} check."
-				return 1
+				# A failed fetch is not a change — leave the image alone and try again next
+				# time. The check timestamp is still written, so an outage can't turn every
+				# run into a Docker Hub call.
+				if [ -z "${FETCHED_DIGEST}" ]; then
+					BASE_CHECK="unreachable"
+					log_warn "Could not reach Docker Hub — skipping the ${policy_arg} check."
+				elif [ "${DIGEST_CHANGED}" != "true" ]; then
+					BASE_CHECK="unchanged"
+					log_info "${policy_arg} is up to date."
+				else
+					BASE_CHECK="changed"
+					BUILD_REASON="base"
+					log_info "A new ${policy_arg} was published, refreshing the image..."
+					# Drop the stale local base so the build pulls the fresh one.
+					image_remove "${policy_arg}" || log_warn "Could not remove the local ${policy_arg}; the refresh may reuse it."
+					return 0
+				fi
 			fi
-
-			if [ "${DIGEST_CHANGED}" != "true" ]; then
-				BASE_CHECK="unchanged"
-				log_info "${policy_arg} is up to date."
-				return 1
-			fi
-
-			BASE_CHECK="changed"
-			BUILD_REASON="base"
-			log_info "A new ${policy_arg} was published, refreshing the image..."
-			# Drop the stale local base so the build pulls the fresh one.
-			image_remove "${policy_arg}" || log_warn "Could not remove the local ${policy_arg}; the refresh may reuse it."
-			return 0
 			;;
 
 		*)
@@ -255,6 +280,11 @@ image_needs_build() {
 			exit 1
 			;;
 	esac
+
+	image_script_newer "${image}" || return 1
+	BUILD_REASON="script"
+	log_info "$(basename "$0") changed since its image was built, rebuilding..."
+	return 0
 }
 
 # Records which base digest an image was just built against, so the next base check of

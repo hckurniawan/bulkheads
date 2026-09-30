@@ -10,6 +10,9 @@ BASE_INSTALL_DIR="${HOME}/.local"
 DEFAULT_SHARE_DIR="${BASE_INSTALL_DIR}/share/docklets"
 BIN_DIR="${BASE_INSTALL_DIR}/bin"
 
+# Oldest Apple `container` CLI docklet supports, as major.minor.
+CONTAINER_MIN_VERSION="1.5"
+
 # Populated by resolve_share_dir: where the clone lives and whether install.sh is
 # being run from inside an existing checkout (in which case nothing is cloned).
 SHARE_DIR="${DEFAULT_SHARE_DIR}"
@@ -60,11 +63,46 @@ require_container_cli() {
 	log_info "Found required command: container."
 }
 
-# Verifies all host prerequisites (Bash, Git, container) are present.
+# Exits with an error unless `container --version` reports CONTAINER_MIN_VERSION or
+# newer. The first X.Y or X.Y.Z in the output is taken as the version, so extra words
+# around it don't matter; output with no version in it is an error rather than a guess.
+# Only major and minor are compared, so any patch release of the minimum qualifies.
+require_container_version() {
+	local output version major minor min_major min_minor
+	if ! output="$(container --version 2>&1)"; then
+		log_error "Could not read the container CLI version: \`container --version\` failed."
+		log_error "Output: ${output:-<none>}"
+		exit 1
+	fi
+
+	version="$(printf '%s\n' "${output}" | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 || true)"
+	if [ -z "${version}" ]; then
+		log_error "Could not find a version number in \`container --version\` output: ${output:-<none>}"
+		exit 1
+	fi
+
+	major="${version%%.*}"
+	minor="${version#*.}"
+	minor="${minor%%.*}"
+	min_major="${CONTAINER_MIN_VERSION%%.*}"
+	min_minor="${CONTAINER_MIN_VERSION#*.}"
+
+	if [ "${major}" -lt "${min_major}" ] \
+		|| { [ "${major}" -eq "${min_major}" ] && [ "${minor}" -lt "${min_minor}" ]; }; then
+		log_error "docklet needs Apple's \`container\` CLI ${CONTAINER_MIN_VERSION} or newer, but found ${version}."
+		log_error "Update it from https://github.com/apple/container/releases"
+		exit 1
+	fi
+	log_info "Found container ${version} (${CONTAINER_MIN_VERSION} or newer required)."
+}
+
+# Verifies all host prerequisites (Bash, Git, container) are present, and that
+# container is new enough.
 require_prerequisites() {
 	require_cmd bash
 	require_cmd git
 	require_container_cli
+	require_container_version
 }
 
 # Creates the ~/.local directory tree (share and bin) when missing.

@@ -25,6 +25,20 @@ log_error() { printf '\033[0;31m[ERROR]\033[0m %s\n' "$*"; }
 # Prints this wrapper's isolated data directory, derived from the *invoked* name
 # (basename "$0") — so symlinking a wrapper under a different name yields a fully
 # separate config. Must stay based on the invoked name, never the resolved path.
+# Given a name, prints that name's directory instead, for a wrapper that uses another
+# wrapper's data (git-secret uses a gpg keyring). A name that is empty, starts with a
+# dot or contains a slash is rejected, so the path can never leave PERSISTENT_DATA_DIR
+# or land on .docklet.
 data_dir() {
-	printf '%s/%s' "${PERSISTENT_DATA_DIR}" "$(basename "$0")"
+	local name
+	name="${1-$(basename "$0")}"
+
+	case "${name}" in
+		"" | .* | */*)
+			log_error "data_dir: '${name}' is not a valid data directory name." >&2
+			return 1
+			;;
+	esac
+
+	printf '%s/%s' "${PERSISTENT_DATA_DIR}" "${name}"
 }

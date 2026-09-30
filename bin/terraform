@@ -9,7 +9,7 @@ DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install doc
 
 # Official image the wrapper runs Terraform in. Docker Hub moves the major.minor tag to
 # each new patch release, so this tracks 1.15.x; a new minor or major is a hand edit.
-IMAGE="hashicorp/terraform:1.15"
+IMAGE="hashicorp/terraform:1.16"
 
 # The official image is pulled, not built. image_needs_build has already removed a stale
 # local copy, so `container run` pulls the current tag; all that's left is recording
@@ -34,14 +34,18 @@ main() {
 	# most once per STALENESS_PERIOD). `terraform update` forces a fresh pull.
 	image_needs_build "${IMAGE}" base "${IMAGE}" && pull
 
+	# Allocate a TTY only when both stdin and stdout are one, so redirected output
+	# doesn't get CRLF newlines.
+	tty_flag="-i"
+	[ -t 0 ] && [ -t 1 ] && tty_flag="-it"
+
 	log_info "Running Terraform in a container, mounting the current directory..."
 	log_info "Note: Terraform will see the current directory as /data inside the container."
 
 	# No --user: `container` bind mounts are root-owned inside the guest (no uid mapping
 	# yet — apple/container#165), and files written by in-container root come back owned
 	# by the invoking macOS user anyway.
-	container run \
-		-it --rm \
+	container run ${tty_flag} --init --rm \
 		-e "HOME=/tmp" \
 		-v "$( pwd )":/data \
 		-w /data \

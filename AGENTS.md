@@ -19,6 +19,26 @@ Every wrapper also mounts the working directory: at `/work` for `claude-code-cli
 
 `bin/claude-code-cli` is the reference for the build pattern and `bin/terraform` for the official-image pattern.
 
+**`gpg` and `git-secret` share one image**, `docklet/gpg`, so git-secret always runs the exact gpg the `gpg` wrapper runs, against a `gpg` keyring.
+- `bin/gpg` owns everything: the Dockerfile, `update`, the mounts and the run. Its image installs Alpine's `gnupg` plus git-secret and git-secret's dependencies.
+- `bin/git-secret` only resolves the keyring and runs `DOCKLET_GPG_TOOL=git-secret DOCKLET_GPG_KEYRING="${KEYRING}" exec "${DOCKLET_HOME}/bin/gpg" "$@"`. It doesn't source the lib or define a Dockerfile, and it never builds an image of its own.
+  - It runs the gpg script by its path in the clone, so with no keyring set, `basename "$0"` is `gpg` and the keyring is `~/docklet-data/gpg`, whether or not `gpg` was added to `~/.local/bin`.
+  - `bin/gpg` is also the `$0` that the script-change check compares against. Editing only `bin/git-secret` never rebuilds the image, and nothing in it needs to.
+  - `git-secret update` reaches `bin/gpg`'s `update` and rebuilds the shared image. `git-secret -- update` reaches git-secret itself.
+- `DOCKLET_GPG_TOOL` defaults to `gpg`, and `bin/gpg` exits on any value other than `gpg` or `git-secret`. The container is run with the tool name as its first argument.
+- **The repository picks the keyring, not the wrapper's name.** `bin/git-secret` reads `docklet.gpgKeyring` with `git config --get` on the Mac, from the current directory, so a repository's local value overrides a `--global` one. An alias of `gpg` keeps its own keyring as usual, and `docklet.gpgKeyring gpg-work` points git-secret at it. Aliases of `git-secret` add nothing, since the keyring doesn't depend on its name.
+  - Exit 1 from `git config --get` means the key isn't set, and the `gpg` keyring is used. Any other failure is fatal rather than a quiet fallback to another keyring.
+  - `bin/gpg` passes a non-empty `DOCKLET_GPG_KEYRING` to `data_dir <name>`, which rejects a name that's empty, starts with a dot or contains `/`. That keeps the path inside `PERSISTENT_DATA_DIR` and off `.docklet`.
+  - A named keyring must already exist. `bin/gpg` exits instead of creating it, because an empty keyring can't decrypt anything. The default keyring is still created on first use.
+- The data folder is mounted at `/root/.gnupg` (gpg's default home), with no `GNUPGHOME`, and `chmod 700`ed, since gpg warns about a home directory other users can read.
+- The entrypoint is generic:
+  ```dockerfile
+  ENTRYPOINT [ "/bin/sh", "-c", "mkdir -p -m 700 /run/user/0 && exec \"$@\"", "entrypoint" ]
+  ```
+  When `/run/user/0` exists, GnuPG puts every socket (gpg-agent, dirmngr, keyboxd) under `/run/user/0/gnupg` instead of the bind-mounted home directory. This replaces per-socket `%Assuan%` redirect files, which would miss sockets and leave files in the keyring folder. The directory is created at run time in case `/run` is a fresh tmpfs.
+- git-secret is a pinned release built from its GitHub source tarball and verified by SHA-256, so `GIT_SECRET_VERSION` and `GIT_SECRET_SHA256` are bumped together by hand. Upstream's `make build` only concatenates shell files, so `make` is a virtual package removed in the same layer, with no second build stage.
+- Only the working directory is mounted, so git-secret must be run from the repository root, where `.git` is visible. The image sets `safe.directory /data`. Because the wrapper is on `PATH` as `git-secret`, `git secret …` also reaches it.
+
 ## The wrapper pattern
 
 Preserve this structure when adding or editing a wrapper:
@@ -30,7 +50,7 @@ Preserve this structure when adding or editing a wrapper:
    ```
    The `||` keeps it `set -e`-safe. Always source `lib/common.sh`, never a single part, so the whole API is available and the layout can change without touching `bin/`.
 
-2. **Variables.** Set `IMAGE`. If the tool keeps state, also set `DATA_DIR="$(data_dir)"`. `data_dir` returns `${PERSISTENT_DATA_DIR}/<invoked name>` (from `basename "$0"`), so an alias symlink gets its own isolated state. Keep it based on the invoked name, never on the resolved path.
+2. **Variables.** Set `IMAGE`. If the tool keeps state, also set `DATA_DIR="$(data_dir)"`. `data_dir` returns `${PERSISTENT_DATA_DIR}/<invoked name>` (from `basename "$0"`), so an alias symlink gets its own isolated state. Keep it based on the invoked name, never on the resolved path. `data_dir <name>` returns another name's folder, for a wrapper that uses another wrapper's data (only `gpg`, for git-secret's keyring). It rejects an unsafe name and returns 1, which exits a `set -e` assignment.
 
 3. **Decide whether to build.** Use exactly one line, never a hand-rolled check:
    ```sh
@@ -39,9 +59,10 @@ Preserve this structure when adding or editing a wrapper:
    image_needs_build "${IMAGE}" base "${BASE_IMAGE}" && build   # base tag moves
    ```
    - Every policy implies `missing`: an absent image always builds.
+   - Every policy also rebuilds a built image when the wrapper script is newer than its `built` stamp (`image_script_newer`), so a Dockerfile change arriving through `docklet update` takes effect on the next run. `stat -L -f %m "$0"` follows the `~/.local/bin` symlink to the clone file. With no `built` stamp there is nothing to compare, so official-image wrappers are never affected. The policy's own check runs first, so a moved base is still reported as `base`.
    - `age` compares against the build stamp written by `image_build`.
    - `base` checks the base image's Docker Hub digest at most once per `STALENESS_PERIOD`. It rebuilds only when the digest changed, and removes the stale local base first so the build pulls the new one. An unreachable Hub is never treated as a change, and the check time is still recorded so an outage can't make every run call Docker Hub.
-   - The function reports through `BUILD_REASON` (`missing`/`age`/`base`/`none`) and, under `base`, through `BASE_CHECK` (`skipped`/`unchanged`/`changed`/`unreachable`).
+   - The function reports through `BUILD_REASON` (`missing`/`age`/`base`/`script`/`none`) and, under `base`, through `BASE_CHECK` (`skipped`/`unchanged`/`changed`/`unreachable`).
    - Misuse **exits** rather than returning, so a caller bug is never read as "no build needed". Misuse means no image, an unknown policy, or a non-numeric period.
 
 4. **Build.** The wrapper's builder is named `build` and always builds; the decision belongs to `image_needs_build`. Never name it `image_build`: that would shadow the lib's builder and recurse forever.
@@ -71,8 +92,18 @@ Preserve this structure when adding or editing a wrapper:
 
 6. **Run.**
    - `mkdir -p` each mount source first.
-   - Then run `container run --rm` with the mounts, passing `"${FORWARD_ARGS[@]}"` (or `"$@"` when there's no `args_parse`) to the entrypoint.
-   - Use `-it` for interactive tools. Tools that should also work in pipelines use `-i`, adding `-t` only when `[ -t 0 ]`.
+   - Then run `container run ${tty_flag} --init --rm` with the mounts, passing `"${FORWARD_ARGS[@]}"` (or `"$@"` when there's no `args_parse`) to the entrypoint.
+   - **Check all three flags on every wrapper, new or edited: `${tty_flag}`, `--init` and `--rm`.** They're required unless a wrapper has a real reason not to use one. An exception must be explained in a comment at the `container run` line and noted in the Wrappers section.
+     - `--rm` removes the container when it exits, so nothing but the mounts survives a run.
+     - `--init` runs a minimal init as PID 1, which passes signals such as Ctrl-C on to the tool and reaps exited child processes. Without it, the tool is PID 1 and may ignore those signals.
+     - `${tty_flag}` is set as described below.
+     - A wrapper that hands off to another wrapper instead of calling `container run` (today only `git-secret`, through `bin/gpg`) inherits that wrapper's flags. Check them there.
+   - Use `-i`, adding `-t` only when both stdin and stdout are terminals:
+     ```sh
+     tty_flag="-i"
+     [ -t 0 ] && [ -t 1 ] && tty_flag="-it"
+     ```
+     A TTY turns output newlines into CRLF, so checking stdin alone would corrupt `tool args > out` typed at a terminal. Plain `-it` is an exception, only for tools that can't work without a terminal; say why in a comment.
    - **Never pass `--user`, and don't bake a non-root `USER` into an image.** `container` presents bind mounts as root-owned inside the guest and has no UID mapping yet ([apple/container#165](https://github.com/apple/container/issues/165)), so a non-root process couldn't write to its own mounts. Files written by root in the container still come back owned by the macOS user.
 
 ## Choosing an image
@@ -101,7 +132,7 @@ Preserve this structure when adding or editing a wrapper:
 | `args.sh` | `args_parse` | core |
 | `engine.sh` | `container_require`, `container_start_system`, `container_builder_reset`, `container_build_context` | core |
 | `registry.sh` | `registry_digest_changed` | core |
-| `image.sh` | `image_exists`, `image_remove`, `image_build`, `image_update`, `image_needs_build`, `image_record_base`, `image_slug`, `image_stamp_path`, `image_stamp_stale` | core, engine, registry |
+| `image.sh` | `image_exists`, `image_remove`, `image_build`, `image_update`, `image_needs_build`, `image_record_base`, `image_script_newer`, `image_slug`, `image_stamp_path`, `image_stamp_stale` | core, engine, registry |
 
 **Keep the layering intact and greppable:**
 - `registry.sh` never calls `container`. Docker Hub is the registry `container` pulls from, not the Docker engine, which is why this code survived the removal of Docker. `grep -n '^[^#]*container ' lib/registry.sh` must print nothing.
@@ -133,6 +164,7 @@ Preserve this structure when adding or editing a wrapper:
 
 **`install.sh`** is standalone. It runs before the clone exists, so it has its own log helpers and can't source `lib/`.
 - It checks for `bash`, `git` and `container` (without starting the service).
+- It requires `container` to be at least `CONTAINER_MIN_VERSION` (1.5). It takes the first `X.Y[.Z]` in `container --version`'s output and compares only major and minor. It stops, printing the raw output, if the command fails or no version number is found. Only the installer checks the version; wrappers don't.
 - It creates `~/.local/{share,bin}` and symlinks `bin/docklet` into `~/.local/bin`.
 - It prints a `PATH` hint when `~/.local/bin` isn't on `PATH`.
 
@@ -153,7 +185,7 @@ The repository and install directory are named `docklets`, while the project and
 - **Deleting state is safe.**
   - Deleting `checked` causes another Hub check.
   - Deleting `base-digest` makes the next check see a change and rebuild.
-  - Deleting `built` makes the `age` policy rebuild.
+  - Deleting `built` makes the `age` policy rebuild, and turns off the script check until the next build.
 - **Temporary files.** `DOCKLET_SYSTEM_DIR` also holds `empty-context/` (the build context) and the temporary Dockerfiles `image_build` spools.
 
 ## Security model and known issues
@@ -167,4 +199,5 @@ The repository and install directory are named `docklets`, while the project and
 After any structural change (a new or renamed wrapper, a changed lifecycle step, a new convention), update both files:
 
 - **README.md** first. It's the user-facing source of truth and stays short: requirements, install, usage, the wrapper table and one-line troubleshooting. Explanations of general behaviour, such as how images stay fresh, don't name specific tools.
+  - The wrapper table lists every committed wrapper with a one-line purpose and what it keeps. Add a row when a wrapper is committed, and remove it when the wrapper is. Don't list a wrapper that exists only in the working tree.
 - **AGENTS.md** next. Rules, rationale, per-wrapper facts, upstream issue references and implementation details go here.

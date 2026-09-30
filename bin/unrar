@@ -1,0 +1,81 @@
+#!/bin/bash
+# Wrapper that runs unrar inside a throwaway container, building the image on first
+# use from a pinned Alpine base and a pinned unrar source release, and supporting
+# `unrar update` to force a rebuild.
+set -e
+
+# Locate the docklet clone via the installed `docklet` manager (must be on PATH)
+# so the shared lib can be sourced. Hard requirement — no local fallback.
+DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
+. "${DOCKLET_HOME}/lib/common.sh"
+
+# Base image, pinned to a fixed tag rather than :latest. Moving to a newer Alpine
+# means bumping this tag by hand.
+ALPINE_IMAGE="alpine:3.24.2"
+
+# unrar release, and the SHA-256 of its GitHub source tarball. Moving to a newer
+# release means bumping both by hand.
+UNRAR_VERSION="7.3.1"
+UNRAR_SHA256="fb433f69340d440d2dbb32598669f617b004bb84e91f740190b0a8df54e2d388"
+
+# Name of the image to build and run.
+IMAGE="docklet/unrar"
+
+# Builds the image from the inline Dockerfile. The Dockerfile is piped to
+# image_build, which spools it to a file, builds it against an empty context and
+# stamps the build time. Whether a build is needed at all is image_needs_build's call.
+#
+# The compiler is installed as a virtual package and removed in the same layer, so no
+# second build stage is needed. libstdc++ is installed on its own first, so removing
+# g++ doesn't take the runtime library unrar links against with it.
+build() {
+	log_info "Building image..."
+	image_build "${IMAGE}" <<-EOF
+		FROM ${ALPINE_IMAGE}
+
+		RUN apk add --no-cache libstdc++ \\
+		    && apk add --no-cache --virtual .build-deps g++ make \\
+		    && cd /tmp \\
+		    && wget -O source.tgz "https://github.com/hckurniawan/unrar/archive/refs/tags/v${UNRAR_VERSION}.tar.gz" \\
+		    && echo "${UNRAR_SHA256}  source.tgz" | sha256sum -c - \\
+		    && tar xzf source.tgz \\
+		    && make -C "unrar-${UNRAR_VERSION}" -j"\$(nproc)" \\
+		    && install -m 0755 "unrar-${UNRAR_VERSION}/unrar" /usr/bin/unrar \\
+		    && apk del .build-deps \\
+		    && rm -rf /tmp/* /var/cache/apk/*
+
+		ENTRYPOINT [ "/usr/bin/unrar" ]
+	EOF
+}
+
+# Ensures the image is current, then runs unrar against the current directory.
+main() {
+	# `update` before the first `--` is ours; everything else goes to the tool.
+	args_parse update "$@"
+
+	container_require
+
+	if [ "${ARGS_COMMAND}" = "update" ]; then
+		image_update "${IMAGE}" "unrar ${UNRAR_VERSION} on the latest packages in Alpine ${ALPINE_IMAGE##*:}" || exit 1
+		exit 0
+	fi
+
+	# The base and the unrar release are both pinned, so the image only needs building
+	# when it is missing. `unrar update` rebuilds to pick up patched Alpine packages.
+	image_needs_build "${IMAGE}" missing && build
+
+	# Allocate a TTY only when both stdin and stdout are one, so redirected output
+	# doesn't get CRLF newlines.
+	tty_flag="-i"
+	[ -t 0 ] && [ -t 1 ] && tty_flag="-it"
+
+	# No --user: `container` bind mounts are root-owned inside the guest (no uid mapping
+	# yet — apple/container#165); extracted files still come back owned by the invoking
+	# macOS user.
+	container run ${tty_flag} --init --rm \
+		-v "$( pwd ):/data" \
+		-w /data \
+		"${IMAGE}" "${FORWARD_ARGS[@]}"
+}
+
+main "$@"

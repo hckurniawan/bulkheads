@@ -70,6 +70,7 @@ Nothing else triggers a rebuild. `docklet update` only updates the scripts, and 
 | `git-secret` | [git-secret](https://sobolevn.me/git-secret/): encrypts secret files inside a git repository with GPG. | Uses a `gpg` keyring (see below) |
 | `gpg` | [GnuPG](https://gnupg.org/): encrypts, decrypts and signs files, and manages keys. | Keyring |
 | `terraform` | HashiCorp Terraform, from the official image. | Nothing |
+| `unrar` | RARLAB's UnRAR: lists, tests and extracts RAR archives. | Nothing |
 
 ### git-secret and gpg keyrings
 

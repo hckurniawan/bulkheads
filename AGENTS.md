@@ -120,6 +120,11 @@ Preserve this structure when adding or editing a wrapper:
 - **Use the build pattern only when necessary**: when there's no official image, when the tool installs through npm, pip, gem or an install script, or when significant post-install setup is needed.
   - Name the image `docklet/<script-name>` so `IMAGE` matches the wrapper's filename.
   - Pick the base by what drifts: a moving base tag gets `base`; a pinned base that installs "latest" gets `age`; fully pinned gets `missing`.
+- **Building from a source tarball** (today git-secret in `bin/gpg`, and `unrar`):
+  - Pin a `<TOOL>_VERSION` and the tarball's `<TOOL>_SHA256`, and bump them together by hand. The build uses the `missing` policy.
+  - Download the GitHub tag tarball (`…/archive/refs/tags/v${VERSION}.tar.gz`) into `/tmp` with Alpine's `wget`, and check it with `sha256sum -c -` before unpacking. The tarball unpacks to `<repo>-<version>/`, without the `v`, so build with `make -C "<repo>-${VERSION}"`.
+  - Install build tools as `--virtual .build-deps` and `apk del` them in the same `RUN`, rather than using a second build stage. Install any runtime library the tool links against (e.g. `libstdc++` for unrar) explicitly first, so removing the build tools doesn't remove it too.
+  - `unrar` builds from a mirror of RARLAB's source, [hckurniawan/unrar](https://github.com/hckurniawan/unrar), so a new release has to be tagged there first.
 - `container build` rejects Dockerfiles larger than 16 KiB on stdin. `image_build` passes the file by path, so it's not known whether the limit still applies. The current Dockerfiles are far below it either way.
 
 ## The shared library

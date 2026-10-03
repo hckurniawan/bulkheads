@@ -1,18 +1,18 @@
-# docklet — wrapper argument parsing: the `update`-style command and the `--` separator.
+# bulkhead — wrapper argument parsing: the `update`-style command and the `--` separator.
 #
 # Pure string handling on top of core.sh. Every wrapper that takes a command of its own
 # parses it the same way through args_parse, so `--` behaves identically everywhere.
 
-# Part of docklet's shared library; loaded by lib/common.sh. Source-only — this file
+# Part of bulkhead's shared library; loaded by lib/common.sh. Source-only — this file
 # defines functions and variables and executes nothing.
-if [ -n "${_DOCKLET_ARGS_SH:-}" ]; then return 0; fi
-_DOCKLET_ARGS_SH=1
+if [ -n "${_BULKHEAD_ARGS_SH:-}" ]; then return 0; fi
+_BULKHEAD_ARGS_SH=1
 
 # Resolve this part's own directory so it can pull in what it depends on, making it
 # sourceable on its own (handy for testing a layer in isolation). $0 is the wrapper,
 # not this file, so BASH_SOURCE is the only reliable handle.
-: "${DOCKLET_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-. "${DOCKLET_LIB_DIR}/core.sh"
+: "${BULKHEAD_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+. "${BULKHEAD_LIB_DIR}/core.sh"
 
 # Splits a wrapper's arguments into its own command and the arguments to forward into
 # the container:

@@ -4,10 +4,10 @@
 # to pick up the latest Claude Code.
 set -e
 
-# Locate the docklet clone via the installed `docklet` manager (must be on PATH)
+# Locate the bulkhead clone via the installed `bulkhead` manager (must be on PATH)
 # so the shared lib can be sourced. Hard requirement — no local fallback.
-DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
-. "${DOCKLET_HOME}/lib/common.sh"
+BULKHEAD_HOME="$(bulkhead home)" || { echo "bulkhead not found on PATH; install bulkhead first" >&2; exit 1; }
+. "${BULKHEAD_HOME}/lib/common.sh"
 
 # Base image, pinned to a fixed tag rather than :latest. Moving to a newer Alpine
 # means bumping this tag by hand.
@@ -23,7 +23,7 @@ CLAUDE_LATEST_VERSION="https://downloads.claude.ai/claude-code-releases/latest"
 DATA_DIR="$(data_dir)"
 
 # Name of the image to build and run.
-IMAGE="docklet/claude-code-cli"
+IMAGE="bulkhead/claude"
 
 # How old the image may get before it is rebuilt. The base is pinned but the
 # Dockerfile installs the latest Claude Code, so age is the only drift to track.
@@ -61,7 +61,7 @@ main() {
 	mkdir -p "${DATA_DIR}"
 
 	# Rebuild when the image is missing or over REBUILD_PERIOD old. The base is pinned,
-	# so there's no digest to track. `claude-code-cli update` forces a rebuild.
+	# so there's no digest to track. `claude update` forces a rebuild.
 	image_needs_build "${IMAGE}" age "${REBUILD_PERIOD}" && build
 
 	# Allocate a TTY only when both stdin and stdout are one, so redirected output

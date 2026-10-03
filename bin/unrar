@@ -4,10 +4,10 @@
 # `unrar update` to force a rebuild.
 set -e
 
-# Locate the docklet clone via the installed `docklet` manager (must be on PATH)
+# Locate the bulkhead clone via the installed `bulkhead` manager (must be on PATH)
 # so the shared lib can be sourced. Hard requirement — no local fallback.
-DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
-. "${DOCKLET_HOME}/lib/common.sh"
+BULKHEAD_HOME="$(bulkhead home)" || { echo "bulkhead not found on PATH; install bulkhead first" >&2; exit 1; }
+. "${BULKHEAD_HOME}/lib/common.sh"
 
 # Base image, pinned to a fixed tag rather than :latest. Moving to a newer Alpine
 # means bumping this tag by hand.
@@ -19,7 +19,7 @@ UNRAR_VERSION="7.3.1"
 UNRAR_SHA256="fb433f69340d440d2dbb32598669f617b004bb84e91f740190b0a8df54e2d388"
 
 # Name of the image to build and run.
-IMAGE="docklet/unrar"
+IMAGE="bulkhead/unrar"
 
 # Builds the image from the inline Dockerfile. The Dockerfile is piped to
 # image_build, which spools it to a file, builds it against an empty context and

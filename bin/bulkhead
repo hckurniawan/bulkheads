@@ -1,0 +1,570 @@
+#!/bin/bash
+# Management utility for bulkhead — the collection of containerised CLI wrappers.
+set -e
+
+# The bulkhead script is installed by cloning the bulkheads repo into a share dir
+# (e.g. ~/.local/share/bulkheads) and symlinking this script onto PATH (e.g.
+# ~/.local/bin/bulkhead). Resolve the symlink chain by hand (readlink -f is GNU-only)
+# to find the real script inside the clone, so REPO_DIR/BIN_DIR point at the share
+# dir — not at the PATH dir the symlink lives in.
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do
+	dir="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	case "$SOURCE" in /*) ;; *) SOURCE="$dir/$SOURCE" ;; esac
+done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+REPO_DIR="$(cd -P "${BIN_DIR}/.." && pwd)"
+
+# The directory this script was invoked through (the PATH dir the symlink lives in).
+# `add` links new wrappers here so they land on the same PATH entry as bulkhead itself,
+# keeping system-wide and per-user installs consistent.
+INVOKED_BIN_DIR="$(cd -P "$(dirname "$0")" && pwd)"
+
+# core.sh is inert to source and holds BULKHEAD_VERSION, BULKHEAD_SOURCES_DIR and the
+# source compatibility helpers, so they are defined in one place. _deps.sh is the
+# manager-only part that reads wrappers' `# bulkhead-needs:` headers.
+. "${REPO_DIR}/lib/core.sh"
+. "${REPO_DIR}/lib/_deps.sh"
+
+# Lists the wrapper names in one bin/ directory, one per line, sorted.
+_list_wrappers() {
+	[ -d "$1" ] || return 0
+	find "$1" -maxdepth 1 -type f ! -name 'bulkhead' ! -name '.*' | sort | while IFS= read -r f; do
+		basename "${f}"
+	done
+}
+
+# Lists the registered source names (the clones under BULKHEAD_SOURCES_DIR), sorted.
+_list_sources() {
+	[ -d "${BULKHEAD_SOURCES_DIR}" ] || return 0
+	find "${BULKHEAD_SOURCES_DIR}" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | sort | while IFS= read -r d; do
+		basename "${d}"
+	done
+}
+
+# Exits unless a source or wrapper name is safe to use as a single path component:
+# not empty, no leading dot, no slash (the same rule data_dir applies).
+_require_valid_name() {
+	case "$2" in
+		"" | .* | */*)
+			echo "Error: '$2' is not a valid $1 name" >&2
+			exit 1
+			;;
+	esac
+}
+
+# Reports whether a source is usable with this bulkhead, printing a one-word status:
+# "ok", "incompatible (needs X.Y)" or "invalid (no bulkhead-source manifest)".
+# Returns 0 only for "ok".
+_source_status() {
+	local required
+	if ! required="$(_bulkhead_source_requires "${BULKHEAD_SOURCES_DIR}/$1")"; then
+		echo "invalid (no valid bulkhead-source manifest)"
+		return 1
+	fi
+	if ! _bulkhead_version_satisfies "${required}"; then
+		echo "incompatible (needs ${required})"
+		return 1
+	fi
+	echo "ok (needs ${required})"
+}
+
+# Resolves `<name>`, `<source>/<name>` or `core/<name>` to a wrapper's path and prints
+# it. A bare name is searched in the core bin/ and every source's bin/, and must match
+# exactly once, so a source can never silently shadow a core wrapper (or another
+# source's). `core` is reserved and can't be a source name.
+_resolve_wrapper() {
+	local spec src_name name matches source
+	spec="$1"
+
+	case "${spec}" in
+		core/*)
+			name="${spec#core/}"
+			_require_valid_name wrapper "${name}"
+			if [ "${name}" = "bulkhead" ] || [ ! -f "${BIN_DIR}/${name}" ]; then
+				echo "Error: no core wrapper named '${name}'" >&2
+				exit 1
+			fi
+			printf '%s\n' "${BIN_DIR}/${name}"
+			return 0
+			;;
+		*/*)
+			src_name="${spec%%/*}"
+			name="${spec#*/}"
+			_require_valid_name source "${src_name}"
+			_require_valid_name wrapper "${name}"
+			if [ ! -d "${BULKHEAD_SOURCES_DIR}/${src_name}" ]; then
+				echo "Error: no source named '${src_name}' (see 'bulkhead source ls')" >&2
+				exit 1
+			fi
+			if [ "${name}" = "bulkhead" ] || [ ! -f "${BULKHEAD_SOURCES_DIR}/${src_name}/bin/${name}" ]; then
+				echo "Error: no wrapper named '${name}' in source '${src_name}'" >&2
+				exit 1
+			fi
+			printf '%s\n' "${BULKHEAD_SOURCES_DIR}/${src_name}/bin/${name}"
+			return 0
+			;;
+	esac
+
+	name="${spec}"
+	_require_valid_name wrapper "${name}"
+	if [ "${name}" = "bulkhead" ]; then
+		echo "Error: 'bulkhead' is the manager, not a wrapper" >&2
+		exit 1
+	fi
+
+	matches=()
+	[ -f "${BIN_DIR}/${name}" ] && matches+=("${BIN_DIR}/${name}")
+	while IFS= read -r source; do
+		[ -f "${BULKHEAD_SOURCES_DIR}/${source}/bin/${name}" ] \
+			&& matches+=("${BULKHEAD_SOURCES_DIR}/${source}/bin/${name}")
+	done < <(_list_sources)
+
+	if [ "${#matches[@]}" -eq 0 ]; then
+		echo "Error: no wrapper named '${name}' found (see 'bulkhead help')" >&2
+		exit 1
+	fi
+	if [ "${#matches[@]}" -gt 1 ]; then
+		echo "Error: '${name}' exists in more than one place; name it as one of:" >&2
+		[ -f "${BIN_DIR}/${name}" ] && echo "  core/${name}" >&2
+		while IFS= read -r source; do
+			[ -f "${BULKHEAD_SOURCES_DIR}/${source}/bin/${name}" ] && echo "  ${source}/${name}" >&2
+		done < <(_list_sources)
+		exit 1
+	fi
+	printf '%s\n' "${matches[0]}"
+}
+
+# Prints the links in INVOKED_BIN_DIR that point into the given directory.
+_links_into() {
+	local link target
+	for link in "${INVOKED_BIN_DIR}"/*; do
+		[ -h "${link}" ] || continue
+		target="$(readlink "${link}")"
+		case "${target}" in "$1"/*) printf '%s -> %s\n' "${link}" "${target}" ;; esac
+	done
+}
+
+# Splits a command's arguments into -y/--yes, which sets ASSUME_YES=1, and the rest,
+# which go into POSITIONAL in order. The flag is accepted anywhere among the arguments.
+_take_yes() {
+	local arg
+	ASSUME_YES=0
+	POSITIONAL=()
+	for arg in "$@"; do
+		case "${arg}" in
+			-y | --yes) ASSUME_YES=1 ;;
+			*) POSITIONAL+=("${arg}") ;;
+		esac
+	done
+}
+
+# Asks a yes/no question and returns 0 for yes. The second argument (Y or N) is the
+# answer an empty reply gives. With -y it answers yes without asking. When stdin isn't
+# a terminal nobody can answer, so it exits rather than guessing.
+_confirm() {
+	local answer
+	[ "${ASSUME_YES}" -eq 1 ] && return 0
+
+	if [ ! -t 0 ]; then
+		echo "Error: confirmation needed, but stdin isn't a terminal; rerun with -y to answer yes" >&2
+		exit 1
+	fi
+
+	if [ "$2" = "Y" ]; then
+		printf '%s [Y/n] ' "$1"
+	else
+		printf '%s [y/N] ' "$1"
+	fi
+	read -r answer || answer="n"
+	[ -n "${answer}" ] || answer="$2"
+	case "${answer}" in
+		[yY]*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# Exits unless the wrapper at the given path is usable: core wrappers always are, and a
+# source wrapper only when its source is compatible with this bulkhead. A wrapper from an
+# incompatible source would only fail at run time, so refuse to add it now.
+_require_compatible() {
+	local source status
+	case "$1" in
+		"${BULKHEAD_SOURCES_DIR}"/*)
+			source="${1#"${BULKHEAD_SOURCES_DIR}/"}"
+			source="${source%%/*}"
+			if ! status="$(_source_status "${source}")"; then
+				echo "Error: source '${source}' is ${status}; this is bulkhead ${BULKHEAD_VERSION}" >&2
+				exit 1
+			fi
+			;;
+	esac
+}
+
+# Prints a path for messages, with the home directory shown as ~. The path always comes
+# from a variable (BULKHEAD_DATA_DIR, INVOKED_BIN_DIR, ...), so messages follow it if
+# it ever moves.
+_display_path() {
+	case "$1" in
+		"${HOME}") printf '~' ;;
+		"${HOME}"/*) printf '~/%s' "${1#"${HOME}/"}" ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+# Removes one wrapper symlink and confirms it is gone.
+_remove_link() {
+	rm "$1"
+	if [ -e "$1" ] || [ -h "$1" ]; then
+		echo "Error: failed to remove $1" >&2
+		exit 1
+	fi
+	echo "Removed: $1 (data in $(_display_path "$(data_dir "${1##*/}")") kept)"
+}
+
+# `bulkhead source add|rm|ls`: registers, removes and lists child repositories.
+cmd_source() {
+	local sub name url dir status remote links
+	sub="${1:-ls}"
+	shift || true
+
+	case "${sub}" in
+		add)
+			name="${1:?Usage: bulkhead source add <name> <git-url>}"
+			url="${2:?Usage: bulkhead source add <name> <git-url>}"
+			_require_valid_name source "${name}"
+			if [ "${name}" = "core" ]; then
+				echo "Error: 'core' is reserved for bulkhead's own wrappers" >&2
+				exit 1
+			fi
+			dir="${BULKHEAD_SOURCES_DIR}/${name}"
+
+			if [ -e "${dir}" ] || [ -h "${dir}" ]; then
+				echo "Error: ${dir} already exists" >&2
+				exit 1
+			fi
+
+			mkdir -p "${BULKHEAD_SOURCES_DIR}"
+			git clone "${url}" "${dir}"
+
+			# Only a clone made just now is ever deleted here, so nothing of the user's
+			# can be lost.
+			if [ ! -d "${dir}/bin" ]; then
+				echo "Error: ${url} has no bin/ directory; not a bulkhead source" >&2
+				rm -rf "${dir}"
+				exit 1
+			fi
+			if ! status="$(_source_status "${name}")"; then
+				echo "Error: source '${name}' is ${status}; this is bulkhead ${BULKHEAD_VERSION}" >&2
+				rm -rf "${dir}"
+				exit 1
+			fi
+			echo "Added source '${name}': ${status}"
+			echo "Wrappers:"
+			_list_wrappers "${dir}/bin" | sed 's/^/  /'
+			;;
+
+		rm)
+			name="${1:?Usage: bulkhead source rm <name>}"
+			_require_valid_name source "${name}"
+			dir="${BULKHEAD_SOURCES_DIR}/${name}"
+
+			if [ ! -d "${dir}" ] || [ -h "${dir}" ]; then
+				echo "Error: no source named '${name}'" >&2
+				exit 1
+			fi
+
+			links="$(_links_into "${dir}/bin")"
+			if [ -n "${links}" ]; then
+				echo "Error: these links still use source '${name}'; 'bulkhead rm' them first:" >&2
+				printf '%s\n' "${links}" | sed 's/^/  /' >&2
+				exit 1
+			fi
+
+			# The clone may hold work that exists nowhere else, so refuse to delete it.
+			if [ -n "$(git -C "${dir}" status --porcelain 2>/dev/null)" ]; then
+				echo "Error: ${dir} has uncommitted changes; commit, push or discard them first" >&2
+				exit 1
+			fi
+			if git -C "${dir}" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1 \
+				&& [ -n "$(git -C "${dir}" log --oneline '@{u}..' 2>/dev/null)" ]; then
+				echo "Error: ${dir} has commits that aren't pushed; push them first" >&2
+				exit 1
+			fi
+
+			rm -rf "${dir}"
+			echo "Removed source '${name}' (data in $(_display_path "${BULKHEAD_DATA_DIR}") and images are kept)"
+			;;
+
+		ls)
+			if [ -z "$(_list_sources)" ]; then
+				echo "No sources. Add one with: bulkhead source add <name> <git-url>"
+				return 0
+			fi
+			while IFS= read -r name; do
+				status="$(_source_status "${name}" || true)"
+				remote="$(git -C "${BULKHEAD_SOURCES_DIR}/${name}" remote get-url origin 2>/dev/null || echo '?')"
+				printf '%s\t%s\t%s\n' "${name}" "${status}" "${remote}"
+			done < <(_list_sources)
+			;;
+
+		*)
+			echo "Unknown source command: ${sub}" >&2
+			echo "Usage: bulkhead source add <name> <git-url> | rm <name> | ls" >&2
+			exit 1
+			;;
+	esac
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "${cmd}" in
+	help|--help|-h)
+		bin_dir="$(_display_path "${INVOKED_BIN_DIR}")"
+		data_root="$(_display_path "${BULKHEAD_DATA_DIR}")"
+		cat <<-EOF
+		bulkhead ${BULKHEAD_VERSION} — manage containerised CLI tool wrappers
+
+		Each wrapper in bin/ runs a developer tool inside a throwaway container,
+		using Apple's \`container\` CLI.  The host only needs that and Bash.
+
+		Usage:
+		  bulkhead help
+		  bulkhead version
+		  bulkhead home
+		  bulkhead update
+		  bulkhead add [-y] <name|source/name> [<alias>]
+		  bulkhead rm [-y] <name|alias>
+		  bulkhead source add <name> <git-url>
+		  bulkhead source rm <name>
+		  bulkhead source ls
+
+		Commands:
+		  help               Show this help message
+		  version            Print the bulkhead version
+		  home               Print the bulkhead clone root directory
+		  update             Pull the latest scripts (bulkhead, then every source)
+		  add <name> [alias] Symlink a wrapper into ${bin_dir}
+		                     If <alias> is omitted the wrapper name is used
+		                     Use <source>/<name> when the name is in more than one place
+		                     Also offers to add the wrappers it needs
+		  rm <name|alias>    Remove a wrapper's symlink from ${bin_dir}
+		                     (its data in ${data_root} is kept)
+		                     Also offers to remove the wrappers that need it
+		  -y, --yes          Answer yes to add's and rm's questions
+		  source add         Clone a child repository of extra wrappers
+		  source rm          Delete a source's clone (its links must be removed first)
+		  source ls          List sources, their compatibility and remotes
+
+		Available wrappers:
+		EOF
+		_list_wrappers "${BIN_DIR}" | while IFS= read -r name; do
+			printf '  %s\n' "${name}"
+		done
+		_list_sources | while IFS= read -r source; do
+			status="$(_source_status "${source}" || true)"
+			printf '\nFrom source %s (%s):\n' "${source}" "${status}"
+			_list_wrappers "${BULKHEAD_SOURCES_DIR}/${source}/bin" | while IFS= read -r name; do
+				printf '  %s/%s\n' "${source}" "${name}"
+			done
+		done
+		;;
+
+	version|--version)
+		echo "${BULKHEAD_VERSION}"
+		;;
+
+	home)
+		echo "${REPO_DIR}"
+		;;
+
+	update)
+		failed=0
+		echo "Updating bulkhead..."
+		git -C "${REPO_DIR}" pull
+		while IFS= read -r source; do
+			echo "Updating source '${source}'..."
+			if ! git -C "${BULKHEAD_SOURCES_DIR}/${source}" pull --ff-only; then
+				echo "Warning: could not update source '${source}'" >&2
+				failed=1
+			fi
+		done < <(_list_sources)
+
+		# The pull may have changed BULKHEAD_VERSION and this script, so report
+		# compatibility from a fresh process that loads the updated files.
+		if [ -n "$(_list_sources)" ]; then
+			echo "Sources:"
+			"${BIN_DIR}/bulkhead" source ls | sed 's/^/  /'
+		fi
+		echo "Done."
+		exit "${failed}"
+		;;
+
+	add)
+		_take_yes "$@"
+		set -- "${POSITIONAL[@]}"
+		spec="${1:?Usage: bulkhead add [-y] <name|source/name> [<alias>]}"
+		src="$(_resolve_wrapper "${spec}")"
+		dest_name="${2:-${src##*/}}"
+		_require_valid_name alias "${dest_name}"
+		dst="${INVOKED_BIN_DIR}/${dest_name}"
+		_require_compatible "${src}"
+
+		# Preflight: everything is checked before anything is linked, so a failed check
+		# leaves the bin dir exactly as it was.
+		#
+		# If something already exists at the destination, only treat it as linked when
+		# it's a symlink already pointing at this same source; otherwise refuse to
+		# clobber it so an unrelated file or stale link is never silently replaced.
+		target_linked=0
+		if [ -e "${dst}" ] || [ -h "${dst}" ]; then
+			if [ -h "${dst}" ] && [ "$(readlink "${dst}")" = "${src}" ]; then
+				target_linked=1
+			else
+				echo "Error: ${dst} already exists and is not a link to ${src}" >&2
+				exit 1
+			fi
+		fi
+
+		# The wrappers this one needs that aren't linked yet, deepest first. Each is
+		# linked under its own name, which must be free.
+		if ! missing="$(_deps_missing "${INVOKED_BIN_DIR}" "${src}")"; then
+			echo "Error: ${dest_name}'s dependencies can't be resolved; nothing was linked" >&2
+			exit 1
+		fi
+		deps=()
+		planned=("${dst}")
+		while IFS= read -r dep; do
+			[ -n "${dep}" ] || continue
+			_require_compatible "${dep}"
+			dep_dst="${INVOKED_BIN_DIR}/${dep##*/}"
+			if [ -e "${dep_dst}" ] || [ -h "${dep_dst}" ] || _deps_contains "${dep_dst}" "${planned[@]}"; then
+				echo "Error: ${dest_name} needs ${dep}, but ${dep_dst} is already taken; nothing was linked" >&2
+				exit 1
+			fi
+			deps+=("${dep}")
+			planned+=("${dep_dst}")
+		done <<< "${missing}"
+
+		if [ "${#deps[@]}" -eq 0 ] && [ "${target_linked}" -eq 1 ]; then
+			echo "Already linked: ${dst} -> ${src}"
+			exit 0
+		fi
+
+		if [ "${#deps[@]}" -gt 0 ]; then
+			echo "${dest_name} needs these wrappers, which aren't added yet:"
+			for dep in "${deps[@]}"; do
+				printf '  %s\n' "${dep##*/}"
+			done
+			if ! _confirm "Add them?" Y; then
+				echo "Aborted; nothing was linked." >&2
+				exit 1
+			fi
+		fi
+
+		# Link the dependencies first, then the wrapper. A failure removes the links
+		# made by this run, so the bin dir is never left half-done.
+		links=()
+		pairs=()
+		for dep in "${deps[@]}"; do
+			pairs+=("${dep}" "${INVOKED_BIN_DIR}/${dep##*/}")
+		done
+		[ "${target_linked}" -eq 1 ] || pairs+=("${src}" "${dst}")
+
+		i=0
+		while [ "${i}" -lt "${#pairs[@]}" ]; do
+			from="${pairs[${i}]}"
+			to="${pairs[$(( i + 1 ))]}"
+			if ! ln -s "${from}" "${to}" || [ "$(readlink "${to}")" != "${from}" ]; then
+				echo "Error: could not link ${to} -> ${from}; undoing this run's links" >&2
+				for link in "${links[@]}"; do
+					rm -f "${link}"
+				done
+				exit 1
+			fi
+			links+=("${to}")
+			echo "Linked: ${to} -> ${from}"
+			i=$(( i + 2 ))
+		done
+		;;
+
+	rm)
+		_take_yes "$@"
+		set -- "${POSITIONAL[@]}"
+		name="${1:?Usage: bulkhead rm [-y] <name|alias>}"
+		_require_valid_name wrapper "${name}"
+		dst="${INVOKED_BIN_DIR}/${name}"
+
+		if [ "${name}" = "bulkhead" ]; then
+			echo "Error: 'bulkhead' is the manager, not a wrapper" >&2
+			exit 1
+		fi
+
+		# Only remove a symlink that points into this clone's bin/ or a source's bin/,
+		# so rm can never delete an unrelated file or a link someone else put there.
+		if [ ! -h "${dst}" ]; then
+			echo "Error: ${dst} is not a wrapper symlink" >&2
+			exit 1
+		fi
+		target="$(readlink "${dst}")"
+		case "${target}" in
+			"${BIN_DIR}"/*) ;;
+			"${BULKHEAD_SOURCES_DIR}"/*/bin/*)
+				# The glob's * also matches slashes, so check the shape is exactly
+				# <source>/bin/<name>.
+				rest="${target#"${BULKHEAD_SOURCES_DIR}/"}"
+				rest="${rest#*/}"
+				case "${rest}" in
+					bin/*/* | bin/)
+						echo "Error: ${dst} points to ${target}, not into a source's bin/; leaving it alone" >&2
+						exit 1
+						;;
+					bin/*) ;;
+					*)
+						echo "Error: ${dst} points to ${target}, not into a source's bin/; leaving it alone" >&2
+						exit 1
+						;;
+				esac
+				;;
+			*)
+				echo "Error: ${dst} points to ${target}, not into ${BIN_DIR} or a source; leaving it alone" >&2
+				exit 1
+				;;
+		esac
+
+		# Links whose needs would go unmet without this one go too, most dependent
+		# first, but only once the user agrees.
+		dependents=()
+		while IFS= read -r link; do
+			[ -n "${link}" ] && dependents+=("${link}")
+		done <<< "$(_deps_dependents "${INVOKED_BIN_DIR}" "${dst}")"
+
+		if [ "${#dependents[@]}" -gt 0 ]; then
+			echo "These wrappers depend on ${name} and will also be removed:"
+			for link in "${dependents[@]}"; do
+				printf '  %s\n' "${link##*/}"
+			done
+			if ! _confirm "Continue?" N; then
+				echo "Aborted; nothing was removed." >&2
+				exit 1
+			fi
+			for link in "${dependents[@]}"; do
+				_remove_link "${link}"
+			done
+		fi
+
+		_remove_link "${dst}"
+		;;
+
+	source)
+		cmd_source "$@"
+		;;
+
+	*)
+		echo "Unknown command: ${cmd}" >&2
+		echo "Run 'bulkhead help' for usage." >&2
+		exit 1
+		;;
+esac

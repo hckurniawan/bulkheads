@@ -3,14 +3,14 @@
 # use from a pinned Alpine base and supporting `gpg update` to force a rebuild.
 #
 # The image also carries git-secret, so git-secret always runs against this exact gpg:
-# bin/git-secret sets DOCKLET_GPG_TOOL=git-secret (and DOCKLET_GPG_KEYRING) and execs
+# bin/git-secret sets BULKHEAD_GPG_TOOL=git-secret (and BULKHEAD_GPG_KEYRING) and execs
 # this script.
 set -e
 
-# Locate the docklet clone via the installed `docklet` manager (must be on PATH)
+# Locate the bulkhead clone via the installed `bulkhead` manager (must be on PATH)
 # so the shared lib can be sourced. Hard requirement — no local fallback.
-DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
-. "${DOCKLET_HOME}/lib/common.sh"
+BULKHEAD_HOME="$(bulkhead home)" || { echo "bulkhead not found on PATH; install bulkhead first" >&2; exit 1; }
+. "${BULKHEAD_HOME}/lib/common.sh"
 
 # Base image, pinned to a fixed tag rather than :latest. Moving to a newer Alpine
 # means bumping this tag by hand.
@@ -24,16 +24,16 @@ GIT_SECRET_SHA256="1cba04a59c8109389079b479c1bf5719b595e799680e10d35ce9aa091cb75
 # DATA_DIR is mounted into the container as /root/.gnupg (gpg's default home) and
 # holds the keyrings, trust database and config. data_dir derives it from the invoked
 # name, so symlinking this script under a different name gives a separate keyring.
-# DOCKLET_GPG_KEYRING names another keyring instead: bin/git-secret sets it from the
-# repository's docklet.gpgKeyring git config, and leaves it empty for the `gpg` keyring.
-if [ -n "${DOCKLET_GPG_KEYRING:-}" ]; then
-	DATA_DIR="$(data_dir "${DOCKLET_GPG_KEYRING}")"
+# BULKHEAD_GPG_KEYRING names another keyring instead: bin/git-secret sets it from the
+# repository's bulkhead.gpgKeyring git config, and leaves it empty for the `gpg` keyring.
+if [ -n "${BULKHEAD_GPG_KEYRING:-}" ]; then
+	DATA_DIR="$(data_dir "${BULKHEAD_GPG_KEYRING}")"
 else
 	DATA_DIR="$(data_dir)"
 fi
 
 # Name of the image to build and run.
-IMAGE="docklet/gpg"
+IMAGE="bulkhead/gpg"
 
 # Builds the image from the inline Dockerfile. The Dockerfile is piped to
 # image_build, which spools it to a file, builds it against an empty context and
@@ -67,16 +67,16 @@ build() {
 	EOF
 }
 
-# Sets TOOL to the command to run in the container, from DOCKLET_GPG_TOOL (default
+# Sets TOOL to the command to run in the container, from BULKHEAD_GPG_TOOL (default
 # gpg). Only the tools this image installs are accepted, so a stray value never runs
 # something unexpected.
 resolve_tool() {
-	TOOL="${DOCKLET_GPG_TOOL:-gpg}"
+	TOOL="${BULKHEAD_GPG_TOOL:-gpg}"
 
 	case "${TOOL}" in
 		gpg | git-secret) ;;
 		*)
-			log_error "DOCKLET_GPG_TOOL must be gpg or git-secret, got '${TOOL}'."
+			log_error "BULKHEAD_GPG_TOOL must be gpg or git-secret, got '${TOOL}'."
 			exit 1
 			;;
 	esac
@@ -103,10 +103,10 @@ main() {
 	# (or `git-secret update`) rebuilds to pick up patched packages.
 	image_needs_build "${IMAGE}" missing && build
 
-	# A keyring named through DOCKLET_GPG_KEYRING must already exist: creating it here
+	# A keyring named through BULKHEAD_GPG_KEYRING must already exist: creating it here
 	# would hand git-secret an empty keyring that can't decrypt anything.
-	if [ -n "${DOCKLET_GPG_KEYRING:-}" ] && [ ! -d "${DATA_DIR}" ]; then
-		log_error "The '${DOCKLET_GPG_KEYRING}' keyring doesn't exist. Add it with \`docklet add gpg ${DOCKLET_GPG_KEYRING}\` and import your keys, or fix docklet.gpgKeyring in the repository's git config."
+	if [ -n "${BULKHEAD_GPG_KEYRING:-}" ] && [ ! -d "${DATA_DIR}" ]; then
+		log_error "The '${BULKHEAD_GPG_KEYRING}' keyring doesn't exist. Add it with \`bulkhead add gpg ${BULKHEAD_GPG_KEYRING}\` and import your keys, or fix bulkhead.gpgKeyring in the repository's git config."
 		exit 1
 	fi
 

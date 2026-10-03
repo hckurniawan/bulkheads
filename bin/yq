@@ -2,10 +2,10 @@
 # Wrapper that runs yq inside a throwaway container using the official image.
 set -e
 
-# Locate the docklet clone via the installed `docklet` manager (must be on PATH)
+# Locate the bulkhead clone via the installed `bulkhead` manager (must be on PATH)
 # so the shared lib can be sourced. Hard requirement — no local fallback.
-DOCKLET_HOME="$(docklet home)" || { echo "docklet not found on PATH; install docklet first" >&2; exit 1; }
-. "${DOCKLET_HOME}/lib/common.sh"
+BULKHEAD_HOME="$(bulkhead home)" || { echo "bulkhead not found on PATH; install bulkhead first" >&2; exit 1; }
+. "${BULKHEAD_HOME}/lib/common.sh"
 
 # Official image the wrapper runs yq in. mikefarah/yq publishes no major.minor tags,
 # only `4` and full versions, so this pins the major: Docker Hub moves `4` to every 4.x
@@ -41,10 +41,9 @@ main() {
 	[ -t 0 ] && [ -t 1 ] && tty_flag="-it"
 
 	# No --user, but unlike other wrappers this does NOT mean root: the image bakes in
-	# USER yq. `container` bind mounts are root-owned inside the guest (no uid mapping yet
-	# — apple/container#165), so yq can read files in the current directory but likely
-	# can't write there; `yq -i` (in-place edit) is expected to fail. Kept deliberately:
-	# the image's own user is left alone. -w /data overrides the image's /workdir.
+	# USER yq, and that is kept deliberately. Writing to the mount works regardless —
+	# `yq -i` (in-place edit) was tested and succeeds. -w /data overrides the image's
+	# /workdir.
 	container run ${tty_flag} --init --rm \
 		-v "$( pwd ):/data" \
 		-w /data \

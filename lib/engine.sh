@@ -1,18 +1,18 @@
-# docklet — Apple's `container` CLI: the system service, the builder, build contexts.
+# bulkhead — Apple's `container` CLI: the system service, the builder, build contexts.
 #
 # Engine layer. It may use core.sh; it must never make a Docker Hub (curl) call — that
 # is registry.sh's job — and it must not depend on image.sh above it.
 
-# Part of docklet's shared library; loaded by lib/common.sh. Source-only — this file
+# Part of bulkhead's shared library; loaded by lib/common.sh. Source-only — this file
 # defines functions and variables and executes nothing.
-if [ -n "${_DOCKLET_ENGINE_SH:-}" ]; then return 0; fi
-_DOCKLET_ENGINE_SH=1
+if [ -n "${_BULKHEAD_ENGINE_SH:-}" ]; then return 0; fi
+_BULKHEAD_ENGINE_SH=1
 
 # Resolve this part's own directory so it can pull in what it depends on, making it
 # sourceable on its own (handy for testing a layer in isolation). $0 is the wrapper,
 # not this file, so BASH_SOURCE is the only reliable handle.
-: "${DOCKLET_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-. "${DOCKLET_LIB_DIR}/core.sh"
+: "${BULKHEAD_LIB_DIR:=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+. "${BULKHEAD_LIB_DIR}/core.sh"
 
 # Starts the container system service, which has to be running before any other
 # `container` command works. `container system start` is idempotent, so calling this
@@ -23,7 +23,8 @@ _DOCKLET_ENGINE_SH=1
 # when stdin isn't a terminal the prompt can't be answered and the start fails outright,
 # so --enable-kernel-install answers it up front in that case. (`system start` already
 # pulls the init filesystem image unprompted, so this isn't a new kind of download.)
-container_start_system() {
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_container_start_system() {
 	log_info "Starting the container system service..."
 	if [ -t 0 ]; then
 		container system start
@@ -44,7 +45,7 @@ container_require() {
 
 	container system status >/dev/null 2>&1 && return 0
 
-	if ! container_start_system; then
+	if ! _container_start_system; then
 		log_error "Could not start the container system service. Try it by hand: container system start"
 		exit 1
 	fi
@@ -67,7 +68,8 @@ container_builder_reset() {
 # Dockerfile inline and none of them COPY from the context, so there is nothing to send
 # — and `container` syncs the context into the builder VM, which would make passing the
 # user's current directory needlessly expensive.
-container_build_context() {
-	mkdir -p "${DOCKLET_SYSTEM_DIR}/empty-context"
-	printf '%s' "${DOCKLET_SYSTEM_DIR}/empty-context"
+# Internal: not part of the public API, so sources must not call it (see AGENTS.md).
+_container_build_context() {
+	mkdir -p "${BULKHEAD_SYSTEM_DIR}/empty-context"
+	printf '%s' "${BULKHEAD_SYSTEM_DIR}/empty-context"
 }

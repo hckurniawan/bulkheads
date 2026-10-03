@@ -1,0 +1,46 @@
+#!/bin/bash
+# Runs bulkhead's tests: every tests/*.test.sh, or only the ones named, e.g.
+#   tests/run            # everything
+#   tests/run deps lint  # tests/deps.test.sh and tests/lint.test.sh
+# Each file prints PASS, FAIL or SKIP per case. Exits non-zero when any case failed.
+# Nothing here calls `container`, so the tests run without the container service.
+set -e
+
+# Prints the test files to run, exiting when a named one doesn't exist.
+select_files() {
+	local dir name
+	dir="$1"
+	shift
+	if [ "$#" -eq 0 ]; then
+		ls "${dir}"/*.test.sh
+		return 0
+	fi
+	for name in "$@"; do
+		if [ ! -f "${dir}/${name}.test.sh" ]; then
+			echo "No test file ${dir}/${name}.test.sh" >&2
+			exit 1
+		fi
+		printf '%s\n' "${dir}/${name}.test.sh"
+	done
+}
+
+main() {
+	local dir files file failed
+	dir="$(cd -P "$(dirname "$0")" && pwd)"
+	failed=0
+	files="$(select_files "${dir}" "$@")" || exit 1
+
+	for file in ${files}; do
+		echo "== ${file##*/}"
+		bash "${file}" || failed=1
+	done
+
+	if [ "${failed}" -eq 0 ]; then
+		echo "All tests passed."
+	else
+		echo "Some tests failed." >&2
+	fi
+	exit "${failed}"
+}
+
+main "$@"
